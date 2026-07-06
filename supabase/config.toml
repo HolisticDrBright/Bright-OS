@@ -1,0 +1,7 @@
+# Minimal Supabase CLI config so `supabase link` + `supabase db push`
+# work from bright-os/. Create the NEW project in the dashboard first,
+# then: supabase link --project-ref <ref> && supabase db push
+project_id = "bright-os"
+
+[db]
+major_version = 15
