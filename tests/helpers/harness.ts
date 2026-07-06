@@ -36,10 +36,15 @@ export const dbHolder: { db: MockDb | null } = { db: null };
 
 export interface MockDb {
   from: (table: string) => Record<string, unknown>;
+  storage: { from: (bucket: string) => { upload: (path: string, body: unknown, opts?: unknown) => Promise<{ error: { message: string } | null }> } };
   __ops: Op[];
+  __uploads: { bucket: string; path: string; bytes: number }[];
 }
 
-export function createMockDb(responder: Responder = () => undefined): MockDb {
+export function createMockDb(
+  responder: Responder = () => undefined,
+  opts?: { uploadError?: string },
+): MockDb {
   const ops: Op[] = [];
   const makeBuilder = (table: string) => {
     const op: Op = { table, method: "select", filters: [], modifiers: {} };
@@ -84,7 +89,20 @@ export function createMockDb(responder: Responder = () => undefined): MockDb {
     };
     return b;
   };
-  return { from: (table: string) => makeBuilder(table), __ops: ops };
+  const uploads: MockDb["__uploads"] = [];
+  return {
+    from: (table: string) => makeBuilder(table),
+    storage: {
+      from: (bucket: string) => ({
+        upload: async (path: string, body: unknown) => {
+          uploads.push({ bucket, path, bytes: body instanceof Buffer ? body.length : 0 });
+          return { error: opts?.uploadError ? { message: opts.uploadError } : null };
+        },
+      }),
+    },
+    __ops: ops,
+    __uploads: uploads,
+  };
 }
 
 /** Routes ops by table name; falls back to defaults for unhandled tables. */
