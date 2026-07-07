@@ -27,6 +27,7 @@ export default function CommandView(ctx: ViewCtx) {
   const [links, setLinks] = useState(0);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [anim, setAnim] = useState<Record<string, "approved" | "rejected">>({});
+  const [speak, setSpeak] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -40,6 +41,37 @@ export default function CommandView(ctx: ViewCtx) {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chat]);
 
+  // remember the speak-aloud preference across reloads
+  useEffect(() => {
+    setSpeak(window.localStorage.getItem("brightos-speak") === "1");
+  }, []);
+  useEffect(() => {
+    window.localStorage.setItem("brightos-speak", speak ? "1" : "0");
+  }, [speak]);
+
+  // TTS — read the reactor brain's replies aloud (browser speech synthesis;
+  // works in every browser incl. Brave, no API key). Drives the orb's
+  // "responding" state so the core lights up gold while it talks.
+  const speakText = useCallback((raw: string) => {
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+    const clean = raw
+      .replace(/\[\$[\d.]+\]/g, "") // drop the cost tag
+      .replace(/[*_#`>⌁◈▸✔✕◇⚑⤴●◉]/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 600);
+    if (!clean) return;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(clean);
+    u.rate = 1.05;
+    u.pitch = 0.95;
+    setOrb("speaking");
+    const done = () => setOrb((o) => (o === "speaking" ? "idle" : o));
+    u.onend = done;
+    u.onerror = done;
+    window.speechSynthesis.speak(u);
+  }, []);
+
   const sendCmd = useCallback(
     async (raw: string, via: "web" | "voice" = "web") => {
       const text = raw.trim();
@@ -52,11 +84,12 @@ export default function CommandView(ctx: ViewCtx) {
         const out = await hud.sendCommand(text, via);
         const cost = out.cost_usd > 0 ? `\n[$${out.cost_usd.toFixed(4)}]` : "";
         setChat((c) => [...c, { who: "os", text: `${out.reply}${cost}` }]);
+        if (speak) speakText(out.reply);
       } finally {
         setThinking(false);
       }
     },
-    [hud, sound, thinking],
+    [hud, sound, thinking, speak, speakText],
   );
 
   // ◉ VOICE — browser speech recognition feeding the same brain
@@ -248,6 +281,18 @@ export default function CommandView(ctx: ViewCtx) {
             </div>
             <div onClick={orbClick} className="btn-cyan" style={{ cursor: "pointer", padding: "5px 10px", border: "1px solid rgba(0,212,255,.4)", borderRadius: 5, fontFamily: F.rajdhani, fontWeight: 700, fontSize: 10, letterSpacing: ".14em", color: C.cyan }}>
               ◉ VOICE
+            </div>
+            <div
+              onClick={() => {
+                const next = !speak;
+                setSpeak(next);
+                if (!next) window.speechSynthesis?.cancel();
+                else speakText("Voice online.");
+              }}
+              style={{ cursor: "pointer", padding: "5px 10px", border: `1px solid ${speak ? "rgba(61,245,166,.5)" : "rgba(94,122,147,.4)"}`, borderRadius: 5, fontFamily: F.rajdhani, fontWeight: 700, fontSize: 10, letterSpacing: ".14em", color: speak ? C.green : C.dim }}
+              title="Read replies aloud (works in every browser)"
+            >
+              {speak ? "🔊 SPEAK ON" : "🔊 SPEAK"}
             </div>
           </div>
         </div>
