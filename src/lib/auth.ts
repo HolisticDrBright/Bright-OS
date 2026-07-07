@@ -11,7 +11,7 @@ export type Actor =
  * The signed-in supervisor. Everything mutating goes through this or an
  * explicitly token-authenticated agent path — nothing is publicly writable.
  */
-export async function getHumanActor(): Promise<Actor | null> {
+export async function getHumanActor(): Promise<Extract<Actor, { type: "human" }> | null> {
   try {
     const supabase = await createSupabaseServerClient();
     const {

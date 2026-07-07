@@ -34,6 +34,12 @@ export const authState: { actor: Actor | null } = { actor: null };
 
 export const dbHolder: { db: MockDb | null } = { db: null };
 
+/** Scripted Claude API responses: shift one per messages.create call. */
+export const anthropicState: {
+  queue: Record<string, unknown>[];
+  requests: Record<string, unknown>[];
+} = { queue: [], requests: [] };
+
 export interface MockDb {
   from: (table: string) => Record<string, unknown>;
   storage: { from: (bucket: string) => { upload: (path: string, body: unknown, opts?: unknown) => Promise<{ error: { message: string } | null }> } };

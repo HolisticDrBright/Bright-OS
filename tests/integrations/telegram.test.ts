@@ -2,10 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Update, UserFromGetMe } from "grammy/types";
 
 vi.mock("@/lib/supabase/admin", () => import("../helpers/admin-mock"));
+vi.mock("@anthropic-ai/sdk", () => import("../helpers/anthropic-mock"));
 
 import { createBot } from "@/lib/telegram/bot";
 import { POST as WEBHOOK } from "@/app/api/telegram/webhook/route";
-import { byTable, createMockDb, dbHolder, makeReq, uuid } from "../helpers/harness";
+import { anthropicState, byTable, createMockDb, dbHolder, makeReq, uuid } from "../helpers/harness";
 
 const CHAT_ID = 777;
 const DEC_ID = uuid(5);
@@ -180,11 +181,22 @@ describe("telegram bot", () => {
   });
 
   it("plain text routes to the command brain", async () => {
-    dbHolder.db = createMockDb(byTable({}));
+    dbHolder.db = createMockDb(
+      byTable({
+        agent_sessions: (op) => (op.method === "insert" ? { data: [] } : { data: [] }),
+        heartbeat_events: () => ({ data: [] }),
+      }),
+    );
+    anthropicState.queue = [
+      // haiku classify → action
+      { content: [{ type: "text", text: "action" }], stop_reason: "end_turn", usage: { input_tokens: 20, output_tokens: 2 } },
+      // sonnet answers directly, no tools
+      { content: [{ type: "text", text: "ALP is blocked on the /beta-access copy approval." }], stop_reason: "end_turn", usage: { input_tokens: 400, output_tokens: 30 } },
+    ];
     const { bot, sent } = testBot();
     await bot.handleUpdate(textUpdate("what's blocking ALP?"));
     const msg = sent.find((s) => s.method === "sendMessage");
-    expect(msg?.payload.text).toBeTruthy(); // placeholder brain reply until Phase 5
+    expect(msg?.payload.text).toContain("blocked on the /beta-access copy");
   });
 });
 

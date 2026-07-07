@@ -1,0 +1,295 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+vi.mock("@anthropic-ai/sdk", () => import("../helpers/anthropic-mock"));
+vi.mock("@/lib/supabase/admin", () => import("../helpers/admin-mock"));
+vi.mock("@/lib/auth", () => import("../helpers/auth-mock"));
+
+import { runCommandBrain, classifyIntent } from "@/lib/command/brain";
+import { computeCostUsd } from "@/lib/claude/pricing";
+import { POST as COMMAND } from "@/app/api/command/route";
+import {
+  AGENT,
+  HUMAN,
+  anthropicState,
+  authState,
+  byTable,
+  createMockDb,
+  dbHolder,
+  makeReq,
+  uuid,
+} from "../helpers/harness";
+
+const asDb = (m: unknown) => m as SupabaseClient;
+
+const USAGE = { input_tokens: 500, output_tokens: 60, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+
+const textResponse = (text: string, usage = USAGE) => ({
+  content: [{ type: "text", text }],
+  stop_reason: "end_turn",
+  usage,
+});
+
+const toolUseResponse = (name: string, input: Record<string, unknown>, id = "tu_1") => ({
+  content: [
+    { type: "text", text: "on it" },
+    { type: "tool_use", id, name, input },
+  ],
+  stop_reason: "tool_use",
+  usage: USAGE,
+});
+
+function baseTables(overrides: Parameters<typeof byTable>[0] = {}) {
+  return byTable({
+    agent_sessions: (op) => (op.method === "insert" ? { data: [] } : { data: [{ cost_usd: 1 }] }),
+    heartbeat_events: () => ({ data: [] }),
+    decisions: () => ({ data: [] }),
+    tasks: () => ({ data: [] }),
+    brands: () => ({ data: [] }),
+    agents: () => ({ data: [] }),
+    memory_log: () => ({ data: [] }),
+    ...overrides,
+  });
+}
+
+describe("cost pricing", () => {
+  it("computes real token costs per model incl. cache tiers", () => {
+    expect(computeCostUsd("claude-sonnet-5", { input_tokens: 1_000_000, output_tokens: 0 })).toBe(3);
+    expect(computeCostUsd("claude-haiku-4-5", { input_tokens: 0, output_tokens: 1_000_000 })).toBe(5);
+    expect(
+      computeCostUsd("claude-sonnet-5", {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 1_000_000,
+      }),
+    ).toBe(0.3);
+  });
+});
+
+describe("runCommandBrain", () => {
+  it("refuses when the cost breaker is tripped — zero Claude calls", async () => {
+    dbHolder.db = createMockDb(baseTables({ agent_sessions: () => ({ data: [{ cost_usd: 999 }] }) }));
+    const out = await runCommandBrain("approve everything", { db: asDb(dbHolder.db), via: "web" });
+    expect(out.reply).toContain("COST BREAKER");
+    expect(anthropicState.requests).toHaveLength(0);
+    expect(out.cost_usd).toBe(0);
+  });
+
+  it("/brief is a zero-token fast path", async () => {
+    dbHolder.db = createMockDb(baseTables());
+    const out = await runCommandBrain("/brief", { db: asDb(dbHolder.db), via: "telegram" });
+    expect(out.reply).toContain("BRIGHT OS Briefing");
+    expect(anthropicState.requests).toHaveLength(0);
+    expect(out.cost_usd).toBe(0);
+  });
+
+  it("classifies with haiku then runs the sonnet tool loop; logs real costs", async () => {
+    let insertedTask: Record<string, unknown> | null = null;
+    let loggedSession: Record<string, unknown> | null = null;
+    dbHolder.db = createMockDb(
+      baseTables({
+        agents: () => ({ data: [{ id: uuid(10), name: "COWORK", kind: "claude" }] }),
+        brands: () => ({ data: [{ id: uuid(20), name: "QCL" }] }),
+        tasks: (op) => {
+          if (op.method === "insert") {
+            insertedTask = op.payload as Record<string, unknown>;
+            return { data: { id: uuid(1), title: insertedTask.title, status: insertedTask.status } };
+          }
+          return { data: [] };
+        },
+        agent_sessions: (op) => {
+          if (op.method === "insert") {
+            loggedSession = op.payload as Record<string, unknown>;
+            return { data: [] };
+          }
+          return { data: [{ cost_usd: 1 }] }; // breaker query
+        },
+      }),
+    );
+    anthropicState.queue = [
+      textResponse("action", { ...USAGE, input_tokens: 40, output_tokens: 2 }), // haiku classify
+      toolUseResponse("create_task", { title: "QCL: peptide-safety FAQ", brand: "QCL", agent: "cowork" }),
+      textResponse("Created: QCL: peptide-safety FAQ → COWORK"),
+    ];
+
+    const out = await runCommandBrain("have cowork draft the QCL peptide safety FAQ", {
+      db: asDb(dbHolder.db),
+      via: "web",
+    });
+
+    expect(anthropicState.requests[0].model).toBe("claude-haiku-4-5");
+    expect(anthropicState.requests[1].model).toBe("claude-sonnet-5");
+    expect((anthropicState.requests[1].system as string)).toContain("LANE RULES");
+    expect(insertedTask!.status).toBe("assigned");
+    expect(insertedTask!.agent_id).toBe(uuid(10));
+    expect(out.actions.map((a) => a.tool)).toContain("create_task");
+    expect(out.reply).toContain("Created");
+    expect(out.cost_usd).toBeGreaterThan(0);
+    expect(loggedSession!.model).toBe("claude-sonnet-5");
+    expect(Number(loggedSession!.cost_usd)).toBe(out.cost_usd);
+  });
+
+  it("HARD RULE: decide tool refuses medical/regulatory decisions", async () => {
+    let decisionUpdated = false;
+    dbHolder.db = createMockDb(
+      baseTables({
+        decisions: (op) => {
+          if (op.method === "update") {
+            decisionUpdated = true;
+            return { data: [] };
+          }
+          return {
+            data: [
+              {
+                id: uuid(5),
+                title: "Publish BPC-157 dosing guide",
+                status: "pending",
+                tags: ["publish", "medical-regulatory"],
+              },
+            ],
+          };
+        },
+      }),
+    );
+    anthropicState.queue = [
+      textResponse("action", USAGE), // classify
+      toolUseResponse("decide", { decision_query: "BPC-157", action: "approve" }),
+      textResponse("Refused — medical/regulatory requires the approve buttons."),
+    ];
+
+    const out = await runCommandBrain("approve the BPC-157 dosing guide", {
+      db: asDb(dbHolder.db),
+      via: "web",
+    });
+
+    expect(decisionUpdated).toBe(false); // never touched the decision
+    expect(out.actions.find((a) => a.tool === "decide")?.detail).toBe("guardrail:medical-regulatory");
+    // the refusal came back to the model as the tool result
+    const secondSonnetCall = anthropicState.requests[2];
+    const toolResultMsg = (secondSonnetCall.messages as Record<string, unknown>[]).at(-1);
+    expect(JSON.stringify(toolResultMsg)).toContain("REFUSED");
+  });
+
+  it("decide tool works for non-medical decisions via the human surface", async () => {
+    let updatePayload: Record<string, unknown> | null = null;
+    dbHolder.db = createMockDb(
+      baseTables({
+        decisions: (op) => {
+          if (op.method === "update") {
+            updatePayload = op.payload as Record<string, unknown>;
+            return {
+              data: { id: uuid(6), title: "Rotate SIGMA trading API key", status: "approved", task_id: null },
+            };
+          }
+          if (op.filters.some((f) => f.op === "ilike")) {
+            return {
+              data: [
+                { id: uuid(6), title: "Rotate SIGMA trading API key", status: "pending", tags: ["ops"] },
+              ],
+            };
+          }
+          return { data: { id: uuid(6), title: "Rotate SIGMA trading API key", status: "pending", tags: ["ops"] } };
+        },
+      }),
+    );
+    anthropicState.queue = [
+      textResponse("action", USAGE),
+      toolUseResponse("decide", { decision_query: "SIGMA", action: "approve" }),
+      textResponse("Approved: key rotation."),
+    ];
+    const out = await runCommandBrain("approve the sigma key rotation", {
+      db: asDb(dbHolder.db),
+      via: "voice",
+    });
+    expect(updatePayload!.status).toBe("approved");
+    expect(updatePayload!.decided_via).toBe("voice");
+    expect(out.reply).toContain("Approved");
+  });
+
+  it("/research routes to HERMES and stores flagged claims", async () => {
+    process.env.HERMES_URL = "http://hermes:8642";
+    process.env.HERMES_API_KEY = "k";
+    let claims: Record<string, unknown>[] = [];
+    dbHolder.db = createMockDb(
+      baseTables({
+        agents: () => ({ data: [{ id: uuid(11) }] }),
+        tasks: (op) =>
+          op.method === "insert" ? { data: { id: uuid(2), title: "Research: X sentiment" } } : { data: [] },
+        claims: (op) => {
+          claims = op.payload as Record<string, unknown>[];
+          return { data: [] };
+        },
+      }),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            output_text: JSON.stringify({
+              task_title: "X sentiment on peptide bans",
+              summary: "mixed but trending negative",
+              claims: [
+                { claim_text: "WADA listed", source_url: "https://wada.example/x" },
+                { claim_text: "unsourced rumor", source_url: null },
+              ],
+            }),
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    const out = await runCommandBrain("/research X sentiment on peptide bans", {
+      db: asDb(dbHolder.db),
+      via: "web",
+    });
+
+    expect(claims).toHaveLength(2);
+    expect(claims.every((c) => c.verified === false)).toBe(true);
+    expect(out.reply).toContain("1 claim(s) arrived WITHOUT a source_url");
+    expect(anthropicState.requests).toHaveLength(0); // research lane spends no Claude tokens
+
+    vi.unstubAllGlobals();
+    delete process.env.HERMES_URL;
+    delete process.env.HERMES_API_KEY;
+  });
+
+  it("reports the research lane offline when Hermes is unconfigured", async () => {
+    delete process.env.HERMES_URL;
+    dbHolder.db = createMockDb(baseTables());
+    const out = await runCommandBrain("/research anything", { db: asDb(dbHolder.db), via: "web" });
+    expect(out.reply).toContain("not configured");
+  });
+});
+
+describe("classifyIntent", () => {
+  it("maps haiku's word to an intent", async () => {
+    anthropicState.queue = [textResponse("research", USAGE)];
+    const { intent } = await classifyIntent("look into TB-500 regulations in the EU");
+    expect(intent).toBe("research");
+    expect(anthropicState.requests[0].max_tokens).toBe(8);
+  });
+});
+
+describe("POST /api/command", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("is human-only (agents rejected)", async () => {
+    authState.actor = AGENT("openclaw");
+    dbHolder.db = createMockDb(baseTables());
+    const res = await COMMAND(makeReq("http://os/api/command", { method: "POST", body: { text: "hi" } }));
+    expect(res.status).toBe(401);
+  });
+
+  it("runs a command for the human operator", async () => {
+    authState.actor = HUMAN;
+    dbHolder.db = createMockDb(baseTables());
+    const res = await COMMAND(
+      makeReq("http://os/api/command", { method: "POST", body: { text: "/brief", via: "web" } }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.reply).toContain("Briefing");
+  });
+});
