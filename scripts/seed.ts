@@ -36,19 +36,27 @@ const AGENTS = [
 ] as const;
 
 const BRANDS = [
+  // Focus engines — full telemetry panels
   {
-    name: "Bright Family Clinic",
+    name: "The Holistic Approach",
     tier: "engine",
-    metrics: { visits_wtd: 0, no_show_rate: 0, outcome_label: "booked visit" },
+    metrics: { visits_wtd: 0, no_show_rate: 0, outcome_label: "booked visit", note: "clinic" },
   },
   {
     name: "AI Longevity Pro",
     tier: "engine",
-    metrics: { waitlist: 0, gsc_clicks: 0, content_shipped: 0, outcome_label: "lead" },
+    metrics: { waitlist: 0, gsc_clicks: 0, content_shipped: 0, outcome_label: "lead", note: "health app" },
   },
-  { name: "Quantum Mind", tier: "cron_only", metrics: { beta_users: 0, outcome_label: "activated user" } },
-  { name: "QCL", tier: "cron_only", metrics: { license_review_day: 0, outcome_label: "published post" } },
-  { name: "BDS", tier: "cron_only", metrics: { active_clients: 0, outcome_label: "proposal" } },
+  // Cron-tier — weekly-digest tiles
+  { name: "Holystic Solutions", tier: "cron_only", metrics: { outcome_label: "order", note: "D-Spiked product" } },
+  { name: "Corporate Wellness Program", tier: "cron_only", metrics: { outcome_label: "enrolled company" } },
+  { name: "Health Optimization Program", tier: "cron_only", metrics: { outcome_label: "enrolled client" } },
+  { name: "Longevity Program", tier: "cron_only", metrics: { outcome_label: "enrolled client" } },
+  { name: "Quantum Mind", tier: "cron_only", metrics: { outcome_label: "activated user", note: "hypnotherapy app" } },
+  { name: "Soluna", tier: "cron_only", metrics: { outcome_label: "activated user", note: "astrology app" } },
+  { name: "Petwell", tier: "cron_only", metrics: { outcome_label: "activated user", note: "pet app" } },
+  { name: "Sprout", tier: "cron_only", metrics: { outcome_label: "activated user", note: "plant health app" } },
+  { name: "Bright Digital Solutions", tier: "cron_only", metrics: { outcome_label: "proposal", note: "SEO business" } },
 ] as const;
 
 async function main() {
