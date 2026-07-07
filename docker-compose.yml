@@ -1,0 +1,67 @@
+# BRIGHT OS — full stack on one VPS.
+#   docker compose up -d --build
+# Services: app (HUD + API), workers (heartbeat/briefing/closeout/backup),
+# watcher (Obsidian bridge), hermes (memory+research agent).
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:3100:3100" # put Caddy/nginx with TLS in front
+    volumes:
+      - ${OBSIDIAN_VAULT_HOST:-./vault}:/data/vault
+      - ./HEARTBEAT.md:/app/HEARTBEAT.md:ro
+    environment:
+      OBSIDIAN_VAULT_PATH: /data/vault
+      MEMORY_MD_PATH: /data/vault/MEMORY.md
+    depends_on:
+      - hermes
+
+  workers:
+    build: .
+    restart: unless-stopped
+    command: ["npm", "run", "workers"]
+    env_file: .env
+    volumes:
+      - ${OBSIDIAN_VAULT_HOST:-./vault}:/data/vault
+      - ./HEARTBEAT.md:/app/HEARTBEAT.md:ro
+      - backups:/app/backups
+    environment:
+      OBSIDIAN_VAULT_PATH: /data/vault
+      MEMORY_MD_PATH: /data/vault/MEMORY.md
+      BACKUP_DIR: /app/backups
+
+  watcher:
+    build: .
+    restart: unless-stopped
+    command: ["npm", "run", "watcher"]
+    env_file: .env
+    volumes:
+      - ${OBSIDIAN_VAULT_HOST:-./vault}:/data/vault
+    environment:
+      OBSIDIAN_VAULT_PATH: /data/vault
+      MEMORY_MD_PATH: /data/vault/MEMORY.md
+
+  # Self-hosted hermes-agent (github.com/nousresearch/hermes-agent).
+  # State lives in ./hermes-data (mount of /opt/data). Configure providers
+  # (OPENROUTER_API_KEY etc.) + XAI_API_KEY for x_search via `hermes setup`
+  # or by editing ./hermes-data/.env — see docs/HERMES.md.
+  hermes:
+    image: nousresearch/hermes-agent
+    command: gateway run
+    restart: unless-stopped
+    volumes:
+      - ./hermes-data:/opt/data
+    ports:
+      - "127.0.0.1:8642:8642" # OpenAI-compatible API (keep loopback!)
+      - "127.0.0.1:9119:9119" # its own dashboard (deep-linked from the HUD)
+    environment:
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: "0.0.0.0"
+      API_SERVER_PORT: "8642"
+      API_SERVER_KEY: "${HERMES_API_KEY}"
+      HERMES_DASHBOARD: "1"
+
+volumes:
+  backups:
