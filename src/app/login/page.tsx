@@ -48,6 +48,20 @@ export default function Login() {
     }
   };
 
+  // Local-only bypass — no email/SMTP. The route is hard-disabled in production.
+  const devLogin = async () => {
+    setError("");
+    setStage("busy");
+    const res = await fetch("/api/auth/dev-login", { method: "POST" });
+    if (res.ok) {
+      window.location.assign("/");
+    } else {
+      const body = await res.json().catch(() => ({}));
+      setError(body.error ?? `HTTP ${res.status}`);
+      setStage("email");
+    }
+  };
+
   const inputStyle: React.CSSProperties = {
     width: "100%",
     background: "rgba(5,10,20,.7)",
@@ -121,6 +135,16 @@ export default function Login() {
         <div style={{ textAlign: "center", fontFamily: F.rajdhani, fontSize: 11, letterSpacing: ".22em", color: "#5E7A93" }}>
           SINGLE-OPERATOR SYSTEM · EMAIL OTP
         </div>
+
+        {process.env.NODE_ENV !== "production" && (
+          <button
+            onClick={() => void devLogin()}
+            disabled={stage === "busy"}
+            style={{ marginTop: 10, cursor: "pointer", padding: "10px 0", background: "rgba(255,184,77,.06)", border: "1px dashed rgba(255,184,77,.5)", borderRadius: 6, fontFamily: F.rajdhani, fontWeight: 700, fontSize: 12, letterSpacing: ".18em", color: "#FFB84D", opacity: stage === "busy" ? 0.5 : 1 }}
+          >
+            ⚡ DEV LOGIN · LOCAL, NO EMAIL
+          </button>
+        )}
       </div>
     </div>
   );
