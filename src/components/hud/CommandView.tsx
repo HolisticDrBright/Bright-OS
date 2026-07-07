@@ -44,6 +44,11 @@ export default function CommandView(ctx: ViewCtx) {
   const speakCountRef = useRef(0); // utterances still queued/speaking
   const pendingRef = useRef(""); // unspoken text buffered for sentence-chunked TTS
   const laneRef = useRef(""); // which brain lane the current reply came from
+  const genRef = useRef(0); // bumped on every stop; invalidates queued speech
+  const audioRef = useRef<HTMLAudioElement | null>(null); // reused player for the cloud voice
+  const ttsChainRef = useRef<Promise<void>>(Promise.resolve()); // keeps cloud clips in order
+  const voiceModeRef = useRef<"onyx" | "browser">("onyx"); // degrade to browser on failure
+  const voiceWarnedRef = useRef(false); // warn once if the Jarvis voice is unavailable
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -64,36 +69,125 @@ export default function CommandView(ctx: ViewCtx) {
     window.localStorage.setItem("brightos-speak", speak ? "1" : "0");
   }, [speak]);
 
-  // TTS — read the reactor brain's replies aloud (browser speech synthesis;
-  // works in every browser incl. Brave, no API key). Utterances queue up and
-  // play in order, so we can speak sentence-by-sentence as the reply streams.
-  // Drives the orb's gold "responding" state while anything is still speaking.
-  const enqueueSpeech = useCallback((raw: string) => {
-    if (typeof window === "undefined" || !window.speechSynthesis) return;
-    const clean = stripForSpeech(raw);
-    if (!clean) return;
-    const u = new SpeechSynthesisUtterance(clean);
-    u.rate = 1.05;
-    u.pitch = 0.95;
-    speakCountRef.current += 1;
-    setOrb("speaking");
-    const done = () => {
-      speakCountRef.current = Math.max(0, speakCountRef.current - 1);
-      if (speakCountRef.current === 0) setOrb((o) => (o === "speaking" ? "idle" : o));
-    };
-    u.onend = done;
-    u.onerror = done;
-    window.speechSynthesis.speak(u);
+  // TTS — read the reactor brain's replies aloud in the "Jarvis" voice.
+  // Primary path streams MP3 from /api/tts (OpenAI onyx + butler persona);
+  // if that's unavailable (e.g. no OPENAI_API_KEY) it degrades to the browser's
+  // built-in speech. Utterances/clips play in order, so we can speak
+  // sentence-by-sentence as a reply streams. The orb glows gold while speaking.
+  const finishUtterance = useCallback(() => {
+    speakCountRef.current = Math.max(0, speakCountRef.current - 1);
+    if (speakCountRef.current === 0) setOrb((o) => (o === "speaking" ? "idle" : o));
   }, []);
 
-  // Cancel any in-flight speech and clear the sentence buffer (new command / mute).
+  const speakBrowser = useCallback(
+    (clean: string) => {
+      if (typeof window === "undefined" || !window.speechSynthesis) {
+        finishUtterance();
+        return;
+      }
+      const u = new SpeechSynthesisUtterance(clean);
+      u.rate = 0.98; // measured, unhurried
+      u.pitch = 0.8; // deeper — closer to a butler than the default voice
+      u.onend = finishUtterance;
+      u.onerror = finishUtterance;
+      window.speechSynthesis.speak(u);
+    },
+    [finishUtterance],
+  );
+
+  const playAudio = useCallback(
+    (blob: Blob) =>
+      new Promise<void>((resolve) => {
+        let el = audioRef.current;
+        if (!el) {
+          el = new Audio();
+          audioRef.current = el;
+        }
+        const url = URL.createObjectURL(blob);
+        const done = () => {
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        el.onended = done;
+        el.onerror = done;
+        el.src = url;
+        void el.play().catch(done);
+      }),
+    [],
+  );
+
+  const enqueueSpeech = useCallback(
+    (raw: string) => {
+      const clean = stripForSpeech(raw);
+      if (!clean) return;
+      speakCountRef.current += 1;
+      setOrb("speaking");
+      if (voiceModeRef.current === "browser") {
+        speakBrowser(clean);
+        return;
+      }
+      const myGen = genRef.current;
+      ttsChainRef.current = ttsChainRef.current.then(async () => {
+        if (genRef.current !== myGen) {
+          finishUtterance();
+          return;
+        }
+        try {
+          const res = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text: clean }),
+          });
+          if (!res.ok) throw new Error(`tts ${res.status}`);
+          const blob = await res.blob();
+          if (genRef.current !== myGen) {
+            finishUtterance();
+            return;
+          }
+          await playAudio(blob);
+          finishUtterance();
+        } catch {
+          // Cloud voice unavailable — degrade to the browser voice for the rest
+          // of the session and note it once so the user knows why.
+          voiceModeRef.current = "browser";
+          if (!voiceWarnedRef.current) {
+            voiceWarnedRef.current = true;
+            setChat((c) => [
+              ...c,
+              { who: "os", text: "⚠ Jarvis voice needs OPENAI_API_KEY in .env — using the browser voice for now.", id: idRef.current++ },
+            ]);
+          }
+          if (genRef.current !== myGen) {
+            finishUtterance();
+            return;
+          }
+          speakBrowser(clean);
+        }
+      });
+    },
+    [speakBrowser, playAudio, finishUtterance],
+  );
+
+  // Hard stop: cancel in-flight speech, drop the queue, clear the buffer.
   const resetSpeech = useCallback(() => {
+    genRef.current += 1; // invalidate anything queued/in-flight
     if (typeof window !== "undefined") window.speechSynthesis?.cancel();
+    const el = audioRef.current;
+    if (el) {
+      try {
+        el.pause();
+      } catch {
+        /* ignore */
+      }
+      el.removeAttribute("src");
+    }
+    ttsChainRef.current = Promise.resolve();
     speakCountRef.current = 0;
     pendingRef.current = "";
+    setOrb((o) => (o === "speaking" ? "idle" : o));
   }, []);
 
-  // Speak whole sentences as they arrive; keep the trailing partial buffered.
+  // Speak whole sentences as they stream; keep the trailing partial buffered.
   // On the final flush, speak whatever's left even without a terminator.
   const flushSentences = useCallback(
     (final: boolean) => {
@@ -107,6 +201,27 @@ export default function CommandView(ctx: ViewCtx) {
       if (!m) return;
       pendingRef.current = buf.slice(m[0].length);
       enqueueSpeech(m[0]);
+    },
+    [enqueueSpeech],
+  );
+
+  // Speak a whole (possibly long) reply, split into sentence groups so the
+  // cloud voice starts fast and each request stays a sensible length.
+  const speakChunked = useCallback(
+    (raw: string) => {
+      const clean = stripForSpeech(raw);
+      if (!clean) return;
+      const parts = clean.match(/[^.!?…]+[.!?…]*\s*/g) ?? [clean];
+      let buf = "";
+      for (const p of parts) {
+        if (buf && (buf + p).length > 480) {
+          enqueueSpeech(buf);
+          buf = p;
+        } else {
+          buf += p;
+        }
+      }
+      if (buf.trim()) enqueueSpeech(buf);
     },
     [enqueueSpeech],
   );
@@ -144,13 +259,13 @@ export default function CommandView(ctx: ViewCtx) {
         setChat((c) => c.map((m) => (m.id === osId ? { ...m, text: `${out.reply}${cost}` } : m)));
         if (speak) {
           if (laneRef.current === "chat") flushSentences(true);
-          else enqueueSpeech(out.reply);
+          else speakChunked(out.reply);
         }
       } finally {
         setThinking(false);
       }
     },
-    [hud, sound, thinking, speak, resetSpeech, flushSentences, enqueueSpeech],
+    [hud, sound, thinking, speak, resetSpeech, flushSentences, speakChunked],
   );
 
   // ◉ VOICE — browser speech recognition feeding the same brain
@@ -348,12 +463,12 @@ export default function CommandView(ctx: ViewCtx) {
                 const next = !speak;
                 setSpeak(next);
                 if (!next) resetSpeech();
-                else enqueueSpeech("Voice online.");
+                else enqueueSpeech("Systems online, Doctor. Standing by.");
               }}
               style={{ cursor: "pointer", padding: "5px 10px", border: `1px solid ${speak ? "rgba(61,245,166,.5)" : "rgba(94,122,147,.4)"}`, borderRadius: 5, fontFamily: F.rajdhani, fontWeight: 700, fontSize: 10, letterSpacing: ".14em", color: speak ? C.green : C.dim }}
-              title="Read replies aloud (works in every browser)"
+              title="Read replies aloud in the Jarvis voice (OpenAI onyx; falls back to the browser voice if no key)"
             >
-              {speak ? "🔊 SPEAK ON" : "🔊 SPEAK"}
+              {speak ? "🔊 VOICE ON" : "🔊 VOICE"}
             </div>
           </div>
         </div>

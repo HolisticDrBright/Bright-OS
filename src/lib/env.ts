@@ -62,6 +62,19 @@ export const env = {
   get openaiApiKey() {
     return process.env.OPENAI_API_KEY ?? "";
   },
+  // Text-to-speech (the HUD "Jarvis" voice). Uses the OpenAI key above.
+  get ttsModel() {
+    return process.env.TTS_MODEL ?? "gpt-4o-mini-tts";
+  },
+  get ttsVoice() {
+    return process.env.TTS_VOICE ?? "onyx";
+  },
+  get ttsInstructions() {
+    return (
+      process.env.TTS_INSTRUCTIONS ??
+      "Deep, authoritative AI butler in the spirit of JARVIS. Composed, deliberate, and articulate with quiet gravitas. Unhurried cadence, subtly warm, dry understatement. Never robotic, never sing-song."
+    );
+  },
   get ghlApiKey() {
     return process.env.GHL_API_KEY ?? "";
   },
