@@ -32,7 +32,7 @@ const AGENTS = [
     status: "idle",
     endpoint_url: process.env.HERMES_URL ?? null,
   },
-  { name: "MARISOL · VA", role: "HUMAN VA", kind: "human", status: "idle" },
+  { name: "ALYSSA · VA", role: "HUMAN VA", kind: "human", status: "idle" },
 ] as const;
 
 const BRANDS = [

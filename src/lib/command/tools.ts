@@ -18,7 +18,7 @@ export const COMMAND_TOOLS: Anthropic.Tool[] = [
   {
     name: "create_task",
     description:
-      "Create a task on the command board. Lane rules: COWORK=analysis/drafts, CODEX=verification/board, OPENCLAW=execution (ONE narrow WordPress/exec action per task), HERMES=memory/research, MARISOL=human-only tasks.",
+      "Create a task on the command board. Lane rules: COWORK=analysis/drafts, CODEX=verification/board, OPENCLAW=execution (ONE narrow WordPress/exec action per task), HERMES=memory/research, ALYSSA=human-only tasks.",
     input_schema: {
       type: "object",
       properties: {
