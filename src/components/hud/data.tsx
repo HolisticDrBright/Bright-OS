@@ -46,6 +46,13 @@ export interface CommandReply {
   cost_usd: number;
 }
 
+/** Callbacks fed by the /api/command/stream NDJSON events as they arrive. */
+export interface StreamHandlers {
+  onStatus?: (text: string, lane?: string) => void;
+  onDelta?: (text: string) => void;
+  onAction?: (tool: string, detail: string) => void;
+}
+
 interface HudState {
   agents: AgentRow[];
   tasks: TaskWithRels[];
@@ -58,6 +65,7 @@ interface HudState {
   decide: (id: string, action: "approve" | "reject" | "discuss") => Promise<{ ok: boolean; error?: string }>;
   moveTask: (id: string, status: TaskStatus) => Promise<{ ok: boolean; error?: string }>;
   sendCommand: (text: string, via?: "web" | "voice") => Promise<CommandReply>;
+  sendCommandStream: (text: string, via: "web" | "voice", handlers: StreamHandlers) => Promise<CommandReply>;
   promoteLine: (fromDay: string, line: string) => Promise<{ ok: boolean; error?: string }>;
   refresh: () => void;
 }
@@ -195,6 +203,56 @@ export function HudDataProvider({ children }: { children: React.ReactNode }) {
     return out;
   }, [fetchCore]);
 
+  const sendCommandStream = useCallback<HudState["sendCommandStream"]>(async (text, via, handlers) => {
+    let final: CommandReply = { reply: "", actions: [], cost_usd: 0 };
+    try {
+      const res = await fetch("/api/command/stream", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text, via }),
+      });
+      if (!res.ok || !res.body) {
+        const body = await res.json().catch(() => ({}));
+        return { reply: `⚠ ${body.error ?? `HTTP ${res.status}`}`, actions: [], cost_usd: 0 };
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let evt: Record<string, unknown>;
+          try {
+            evt = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (evt.type === "status") handlers.onStatus?.(evt.text as string, evt.lane as string | undefined);
+          else if (evt.type === "delta") handlers.onDelta?.(evt.text as string);
+          else if (evt.type === "action") handlers.onAction?.(evt.tool as string, evt.detail as string);
+          else if (evt.type === "done")
+            final = {
+              reply: (evt.reply as string) ?? "",
+              actions: (evt.actions as CommandReply["actions"]) ?? [],
+              cost_usd: (evt.cost_usd as number) ?? 0,
+            };
+          else if (evt.type === "error")
+            final = { reply: `⚠ ${(evt.message as string) ?? "command failed"}`, actions: [], cost_usd: 0 };
+        }
+      }
+    } catch (e) {
+      return { reply: `⚠ ${e instanceof Error ? e.message : "stream failed"}`, actions: [], cost_usd: 0 };
+    }
+    void fetchCore();
+    return final;
+  }, [fetchCore]);
+
   const promoteLine = useCallback<HudState["promoteLine"]>(async (fromDay, line) => {
     const res = await fetch("/api/memory/promote", {
       method: "POST",
@@ -222,10 +280,11 @@ export function HudDataProvider({ children }: { children: React.ReactNode }) {
       decide,
       moveTask,
       sendCommand,
+      sendCommandStream,
       promoteLine,
       refresh,
     }),
-    [agents, tasks, decisions, events, brands, metrics, memory, loaded, decide, moveTask, sendCommand, promoteLine, refresh],
+    [agents, tasks, decisions, events, brands, metrics, memory, loaded, decide, moveTask, sendCommand, sendCommandStream, promoteLine, refresh],
   );
 
   return <HudContext.Provider value={value}>{children}</HudContext.Provider>;

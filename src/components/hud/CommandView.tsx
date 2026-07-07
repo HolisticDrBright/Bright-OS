@@ -13,12 +13,23 @@ const PHASES = ["ANALYZING CONNECTIONS", "RANKING RELEVANCE", "SYNTHESIZING INSI
 interface ChatMsg {
   who: "you" | "os";
   text: string;
+  id: number;
+}
+
+/** Strip HUD glyphs + the cost tag so text-to-speech reads clean prose. */
+function stripForSpeech(raw: string): string {
+  return raw
+    .replace(/\[\$[\d.]+\]/g, "") // drop the cost tag
+    .replace(/[*_#`>⌁◈▸✔✕◇⚑⤴●◉⚠⛔⚕]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 600);
 }
 
 export default function CommandView(ctx: ViewCtx) {
   const { hud, fleet, decisions, pendingCount, sound, showStamp, setSelAgent, goTab } = ctx;
   const [chat, setChat] = useState<ChatMsg[]>([
-    { who: "os", text: "BRIGHT OS online. /brief for the rundown · /research <topic> tasks HERMES · plain text routes to the reactor brain." },
+    { who: "os", text: "BRIGHT OS online. /brief for the rundown · /research <topic> tasks HERMES · plain text routes to the reactor brain.", id: 0 },
   ]);
   const [cmdInput, setCmdInput] = useState("");
   const [thinking, setThinking] = useState(false);
@@ -29,6 +40,10 @@ export default function CommandView(ctx: ViewCtx) {
   const [anim, setAnim] = useState<Record<string, "approved" | "rejected">>({});
   const [speak, setSpeak] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const idRef = useRef(1); // stable ids so streaming updates the right bubble
+  const speakCountRef = useRef(0); // utterances still queued/speaking
+  const pendingRef = useRef(""); // unspoken text buffered for sentence-chunked TTS
+  const laneRef = useRef(""); // which brain lane the current reply came from
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -50,46 +65,92 @@ export default function CommandView(ctx: ViewCtx) {
   }, [speak]);
 
   // TTS — read the reactor brain's replies aloud (browser speech synthesis;
-  // works in every browser incl. Brave, no API key). Drives the orb's
-  // "responding" state so the core lights up gold while it talks.
-  const speakText = useCallback((raw: string) => {
+  // works in every browser incl. Brave, no API key). Utterances queue up and
+  // play in order, so we can speak sentence-by-sentence as the reply streams.
+  // Drives the orb's gold "responding" state while anything is still speaking.
+  const enqueueSpeech = useCallback((raw: string) => {
     if (typeof window === "undefined" || !window.speechSynthesis) return;
-    const clean = raw
-      .replace(/\[\$[\d.]+\]/g, "") // drop the cost tag
-      .replace(/[*_#`>⌁◈▸✔✕◇⚑⤴●◉]/g, "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 600);
+    const clean = stripForSpeech(raw);
     if (!clean) return;
-    window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(clean);
     u.rate = 1.05;
     u.pitch = 0.95;
+    speakCountRef.current += 1;
     setOrb("speaking");
-    const done = () => setOrb((o) => (o === "speaking" ? "idle" : o));
+    const done = () => {
+      speakCountRef.current = Math.max(0, speakCountRef.current - 1);
+      if (speakCountRef.current === 0) setOrb((o) => (o === "speaking" ? "idle" : o));
+    };
     u.onend = done;
     u.onerror = done;
     window.speechSynthesis.speak(u);
   }, []);
 
+  // Cancel any in-flight speech and clear the sentence buffer (new command / mute).
+  const resetSpeech = useCallback(() => {
+    if (typeof window !== "undefined") window.speechSynthesis?.cancel();
+    speakCountRef.current = 0;
+    pendingRef.current = "";
+  }, []);
+
+  // Speak whole sentences as they arrive; keep the trailing partial buffered.
+  // On the final flush, speak whatever's left even without a terminator.
+  const flushSentences = useCallback(
+    (final: boolean) => {
+      const buf = pendingRef.current;
+      if (final) {
+        if (buf.trim()) enqueueSpeech(buf);
+        pendingRef.current = "";
+        return;
+      }
+      const m = buf.match(/^[\s\S]*[.!?…]\s/); // up to the last sentence end followed by space
+      if (!m) return;
+      pendingRef.current = buf.slice(m[0].length);
+      enqueueSpeech(m[0]);
+    },
+    [enqueueSpeech],
+  );
+
   const sendCmd = useCallback(
     async (raw: string, via: "web" | "voice" = "web") => {
       const text = raw.trim();
       if (!text || thinking) return;
-      setChat((c) => [...c, { who: "you", text }]);
+      const youId = idRef.current++;
+      const osId = idRef.current++;
+      setChat((c) => [...c, { who: "you", text, id: youId }, { who: "os", text: "", id: osId }]);
       setCmdInput("");
       setThinking(true);
       chime(sound, 740, 0.15);
+      if (speak) resetSpeech();
+      laneRef.current = "";
+      let streamed = "";
       try {
-        const out = await hud.sendCommand(text, via);
+        const out = await hud.sendCommandStream(text, via, {
+          onStatus: (_text, lane) => {
+            if (lane) laneRef.current = lane;
+          },
+          onDelta: (delta) => {
+            streamed += delta;
+            setChat((c) => c.map((m) => (m.id === osId ? { ...m, text: streamed } : m)));
+            // Only the conversational lane speaks live; the act lane speaks its
+            // final reply once (below) so it never reads tool-loop chatter aloud.
+            if (speak && laneRef.current === "chat") {
+              pendingRef.current += delta;
+              flushSentences(false);
+            }
+          },
+        });
         const cost = out.cost_usd > 0 ? `\n[$${out.cost_usd.toFixed(4)}]` : "";
-        setChat((c) => [...c, { who: "os", text: `${out.reply}${cost}` }]);
-        if (speak) speakText(out.reply);
+        setChat((c) => c.map((m) => (m.id === osId ? { ...m, text: `${out.reply}${cost}` } : m)));
+        if (speak) {
+          if (laneRef.current === "chat") flushSentences(true);
+          else enqueueSpeech(out.reply);
+        }
       } finally {
         setThinking(false);
       }
     },
-    [hud, sound, thinking, speak, speakText],
+    [hud, sound, thinking, speak, resetSpeech, flushSentences, enqueueSpeech],
   );
 
   // ◉ VOICE — browser speech recognition feeding the same brain
@@ -105,7 +166,7 @@ export default function CommandView(ctx: ViewCtx) {
       setOrb("listening");
       setTimeout(() => setOrb("speaking"), 2600);
       setTimeout(() => setOrb("idle"), 4400);
-      setChat((c) => [...c, { who: "os", text: "Voice input isn't supported in this browser — type instead, or send a voice note to the Telegram bot." }]);
+      setChat((c) => [...c, { who: "os", text: "Voice input isn't supported in this browser — type instead, or send a voice note to the Telegram bot.", id: idRef.current++ }]);
       return;
     }
     const rec = new Ctor();
@@ -130,8 +191,8 @@ export default function CommandView(ctx: ViewCtx) {
         await hud.decide(d.id, "discuss");
         setChat((c) => [
           ...c,
-          { who: "you", text: `Discuss: ${d.title}` },
-          { who: "os", text: `Thread open on "${d.title}" — context: ${d.impact_note ?? "no impact note"}. Tell me what to change; I'll capture it on the decision.` },
+          { who: "you", text: `Discuss: ${d.title}`, id: idRef.current++ },
+          { who: "os", text: `Thread open on "${d.title}" — context: ${d.impact_note ?? "no impact note"}. Tell me what to change; I'll capture it on the decision.`, id: idRef.current++ },
         ]);
         return;
       }
@@ -142,7 +203,7 @@ export default function CommandView(ctx: ViewCtx) {
         showStamp(action === "approve" ? "APPROVED ✓" : "REJECTED ✕", action === "approve" ? C.green : C.red);
       } else {
         showStamp("BLOCKED", C.red);
-        setChat((c) => [...c, { who: "os", text: `⚠ decide failed: ${res.error}` }]);
+        setChat((c) => [...c, { who: "os", text: `⚠ decide failed: ${res.error}`, id: idRef.current++ }]);
       }
       setTimeout(() => setAnim((a) => { const { [d.id]: _drop, ...rest } = a; return rest; }), 600);
     },
@@ -251,13 +312,13 @@ export default function CommandView(ctx: ViewCtx) {
         {/* command chat */}
         <div className="hud-panel hud-corners hud-corners-tl-only" style={{ padding: 10, display: "flex", flexDirection: "column", gap: 8, maxHeight: 220 }}>
           <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, maxHeight: 140 }}>
-            {chat.map((m, i) => (
-              <div key={i} style={{ alignSelf: m.who === "you" ? "flex-end" : "flex-start", maxWidth: "82%", padding: "7px 11px", borderRadius: 7, border: `1px solid ${m.who === "you" ? "rgba(255,184,77,.35)" : "rgba(0,212,255,.25)"}`, background: m.who === "you" ? "rgba(255,184,77,.07)" : "rgba(0,212,255,.06)", fontSize: 12, lineHeight: 1.5, color: "#D8EAF7", whiteSpace: "pre-wrap", animation: "fadeUp .3s ease-out both" }}>
+            {chat.map((m) => (
+              <div key={m.id} style={{ alignSelf: m.who === "you" ? "flex-end" : "flex-start", maxWidth: "82%", padding: "7px 11px", borderRadius: 7, border: `1px solid ${m.who === "you" ? "rgba(255,184,77,.35)" : "rgba(0,212,255,.25)"}`, background: m.who === "you" ? "rgba(255,184,77,.07)" : "rgba(0,212,255,.06)", fontSize: 12, lineHeight: 1.5, color: "#D8EAF7", whiteSpace: "pre-wrap", animation: "fadeUp .3s ease-out both" }}>
                 <span style={{ fontFamily: F.rajdhani, fontWeight: 700, fontSize: 9.5, letterSpacing: ".18em", color: m.who === "you" ? C.gold : C.cyan }}>
                   {m.who === "you" ? "DR. BRIGHT" : "BRIGHT OS"}
                 </span>
                 <br />
-                {m.text}
+                {m.text || (m.who === "os" ? "▌" : "")}
               </div>
             ))}
             {thinking && (
@@ -286,8 +347,8 @@ export default function CommandView(ctx: ViewCtx) {
               onClick={() => {
                 const next = !speak;
                 setSpeak(next);
-                if (!next) window.speechSynthesis?.cancel();
-                else speakText("Voice online.");
+                if (!next) resetSpeech();
+                else enqueueSpeech("Voice online.");
               }}
               style={{ cursor: "pointer", padding: "5px 10px", border: `1px solid ${speak ? "rgba(61,245,166,.5)" : "rgba(94,122,147,.4)"}`, borderRadius: 5, fontFamily: F.rajdhani, fontWeight: 700, fontSize: 10, letterSpacing: ".14em", color: speak ? C.green : C.dim }}
               title="Read replies aloud (works in every browser)"

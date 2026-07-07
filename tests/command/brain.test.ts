@@ -5,9 +5,11 @@ vi.mock("@anthropic-ai/sdk", () => import("../helpers/anthropic-mock"));
 vi.mock("@/lib/supabase/admin", () => import("../helpers/admin-mock"));
 vi.mock("@/lib/auth", () => import("../helpers/auth-mock"));
 
-import { runCommandBrain, classifyIntent } from "@/lib/command/brain";
+import { runCommandBrain, runCommandBrainStream, classifyIntent } from "@/lib/command/brain";
 import { computeCostUsd } from "@/lib/claude/pricing";
+import type { StreamEvent } from "@/lib/command/router";
 import { POST as COMMAND } from "@/app/api/command/route";
+import { POST as COMMAND_STREAM } from "@/app/api/command/stream/route";
 import {
   AGENT,
   HUMAN,
@@ -291,5 +293,92 @@ describe("POST /api/command", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.reply).toContain("Briefing");
+  });
+});
+
+describe("runCommandBrainStream", () => {
+  it("CHAT lane: streams text deltas, uses no tools, surfaces the lane", async () => {
+    dbHolder.db = createMockDb(baseTables());
+    anthropicState.queue = [
+      textResponse("chat", { ...USAGE, input_tokens: 30, output_tokens: 2 }), // haiku classify (via create)
+      textResponse("Doing great. Running the empire."), // conversational reply (via stream)
+    ];
+    const events: StreamEvent[] = [];
+    const out = await runCommandBrainStream(
+      "hey how's it going",
+      { db: asDb(dbHolder.db), via: "web" },
+      (e) => events.push(e),
+    );
+
+    const deltas = events.filter((e) => e.type === "delta").map((e) => (e as { text: string }).text).join("");
+    expect(deltas).toBe("Doing great. Running the empire.");
+    expect(events.some((e) => e.type === "status" && (e as { lane?: string }).lane === "chat")).toBe(true);
+    expect(out.actions).toHaveLength(0);
+    expect(out.reply).toContain("Doing great");
+    expect(events.at(-1)?.type).toBe("done");
+  });
+
+  it("ACT lane: streams a tool action then the final reply", async () => {
+    let insertedTask: Record<string, unknown> | null = null;
+    dbHolder.db = createMockDb(
+      baseTables({
+        agents: () => ({ data: [{ id: uuid(10), name: "COWORK", kind: "claude" }] }),
+        brands: () => ({ data: [{ id: uuid(20), name: "QCL" }] }),
+        tasks: (op) => {
+          if (op.method === "insert") {
+            insertedTask = op.payload as Record<string, unknown>;
+            return { data: { id: uuid(1), title: insertedTask.title, status: insertedTask.status } };
+          }
+          return { data: [] };
+        },
+      }),
+    );
+    anthropicState.queue = [
+      textResponse("act", USAGE), // classify (create)
+      toolUseResponse("create_task", { title: "QCL: FAQ", brand: "QCL", agent: "cowork" }), // stream turn 1
+      textResponse("Created: QCL: FAQ → COWORK"), // stream turn 2
+    ];
+    const events: StreamEvent[] = [];
+    const out = await runCommandBrainStream(
+      "have cowork draft the QCL FAQ",
+      { db: asDb(dbHolder.db), via: "web" },
+      (e) => events.push(e),
+    );
+
+    expect(insertedTask!.status).toBe("assigned");
+    expect(events.some((e) => e.type === "action" && (e as { tool: string }).tool === "create_task")).toBe(true);
+    expect(out.actions.map((a) => a.tool)).toContain("create_task");
+    expect(out.reply).toContain("Created");
+    expect(events.at(-1)?.type).toBe("done");
+  });
+});
+
+describe("POST /api/command/stream", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("is human-only (agents rejected)", async () => {
+    authState.actor = AGENT("openclaw");
+    dbHolder.db = createMockDb(baseTables());
+    const res = await COMMAND_STREAM(
+      makeReq("http://os/api/command/stream", { method: "POST", body: { text: "hi" } }),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("streams NDJSON that ends in a done event", async () => {
+    authState.actor = HUMAN;
+    dbHolder.db = createMockDb(baseTables());
+    const res = await COMMAND_STREAM(
+      makeReq("http://os/api/command/stream", { method: "POST", body: { text: "/brief", via: "web" } }),
+    );
+    expect(res.status).toBe(200);
+    const lines = (await res.text())
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as StreamEvent);
+    const done = lines.at(-1);
+    expect(done?.type).toBe("done");
+    expect((done as { reply: string }).reply).toContain("Briefing");
   });
 });
