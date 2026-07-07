@@ -75,7 +75,7 @@ Sessions are long-lived (refresh tokens); nothing is publicly writable.
 ```sh
 # on a fresh droplet (2GB+), as root:
 apt update && apt install -y docker.io docker-compose-v2 git
-git clone <this repo> && cd rork-ai-longevity-coach/bright-os
+git clone git@github.com:HolisticDrBright/bright-os.git git clone <this repo> && cd rork-ai-longevity-coach/bright-osgit clone <this repo> && cd rork-ai-longevity-coach/bright-os cd bright-os
 cp .env.example .env && nano .env          # fill EVERYTHING relevant
 mkdir -p vault hermes-data
 
