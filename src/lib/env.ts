@@ -38,6 +38,14 @@ export const env = {
   get dailyCostCapUsd() {
     return Number(process.env.DAILY_COST_CAP_USD ?? "60");
   },
+  // The brain's editable files (PERSONALITY.md / KNOWLEDGE.md / SELF.md).
+  get brainDir() {
+    return process.env.BRAIN_DIR ?? "./brain";
+  },
+  // Embeddings for semantic memory recall (uses OPENAI_API_KEY).
+  get embeddingModel() {
+    return process.env.EMBEDDING_MODEL ?? "text-embedding-3-small";
+  },
   get heartbeatHmacSecret() {
     return required("HEARTBEAT_HMAC_SECRET");
   },
