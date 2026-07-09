@@ -5,7 +5,7 @@ vi.mock("@anthropic-ai/sdk", () => import("../helpers/anthropic-mock"));
 vi.mock("@/lib/supabase/admin", () => import("../helpers/admin-mock"));
 vi.mock("@/lib/auth", () => import("../helpers/auth-mock"));
 
-import { runCommandBrain, runCommandBrainStream, classifyIntent } from "@/lib/command/brain";
+import { runCommandBrain, runCommandBrainStream, classifyIntent, __drainBrainTasks } from "@/lib/command/brain";
 import { computeCostUsd } from "@/lib/claude/pricing";
 import type { StreamEvent } from "@/lib/command/router";
 import { POST as COMMAND } from "@/app/api/command/route";
@@ -50,9 +50,18 @@ function baseTables(overrides: Parameters<typeof byTable>[0] = {}) {
     brands: () => ({ data: [] }),
     agents: () => ({ data: [] }),
     memory_log: () => ({ data: [] }),
+    working_memory: () => ({ data: null }),
+    memories: () => ({ data: [] }),
     ...overrides,
   });
 }
+
+/** The reactor brain's system prompt is a two-block array; helpers to read it. */
+type SystemBlocks = { type: string; text: string; cache_control?: { type: string } }[];
+const systemOf = (req: Record<string, unknown>) => req.system as SystemBlocks;
+
+// Drain fire-and-forget memory upkeep so it never bleeds across tests.
+afterEach(() => __drainBrainTasks());
 
 describe("cost pricing", () => {
   it("computes real token costs per model incl. cache tiers", () => {
@@ -121,7 +130,15 @@ describe("runCommandBrain", () => {
 
     expect(anthropicState.requests[0].model).toBe("claude-haiku-4-5");
     expect(anthropicState.requests[1].model).toBe("claude-sonnet-5");
-    expect((anthropicState.requests[1].system as string)).toContain("LANE RULES");
+    // Two-block cached system prompt: static block (rules + brain files) carries
+    // the cache breakpoint; the dynamic block ends with the personality checkpoint.
+    const system = systemOf(anthropicState.requests[1]);
+    expect(Array.isArray(system)).toBe(true);
+    expect(system[0].text).toContain("LANE RULES");
+    expect(system[0].text).toContain("PERSONALITY"); // hot-reloaded brain file present
+    expect(system[0].cache_control).toEqual({ type: "ephemeral" });
+    expect(system[1].text).toContain("VOICE CHECK");
+    expect(system[1].cache_control).toBeUndefined();
     expect(insertedTask!.status).toBe("assigned");
     expect(insertedTask!.agent_id).toBe(uuid(10));
     expect(out.actions.map((a) => a.tool)).toContain("create_task");
@@ -262,6 +279,73 @@ describe("runCommandBrain", () => {
     dbHolder.db = createMockDb(baseTables());
     const out = await runCommandBrain("/research anything", { db: asDb(dbHolder.db), via: "web" });
     expect(out.reply).toContain("not configured");
+  });
+});
+
+describe("brain memory integration", () => {
+  it("injects working memory + pinned memories into the dynamic block (chat lane)", async () => {
+    dbHolder.db = createMockDb(
+      baseTables({
+        working_memory: (op) =>
+          op.method === "select"
+            ? {
+                data: {
+                  summary_md: "Doctor asked for espresso-length briefings.",
+                  recent: [{ at: "t", you: "hello", os: "Good evening, Doctor." }],
+                },
+              }
+            : { data: [] },
+        memories: (op) =>
+          op.method === "select"
+            ? { data: [{ id: uuid(30), kind: "preference", content: "Dr. Bright prefers espresso.", importance: 5 }] }
+            : { data: [] },
+      }),
+    );
+    anthropicState.queue = [
+      textResponse("chat", USAGE), // classify
+      textResponse("As you were saying, Doctor."), // chat reply
+    ];
+
+    await runCommandBrain("anyway, where were we", { db: asDb(dbHolder.db), via: "web" });
+
+    const system = systemOf(anthropicState.requests[1]);
+    expect(system[0].cache_control).toEqual({ type: "ephemeral" }); // static block cached
+    expect(system[1].text).toContain("WORKING MEMORY");
+    expect(system[1].text).toContain("espresso-length briefings");
+    expect(system[1].text).toContain("PINNED MEMORIES");
+    expect(system[1].text).toContain("Dr. Bright prefers espresso.");
+    expect(system[1].text).toContain("VOICE CHECK"); // anti-drift checkpoint, every call
+    expect(system[1].text).toContain("CONVERSATIONAL TURN"); // chat note rides the dynamic block
+  });
+
+  it("remember tool stores a typed memory through the act lane", async () => {
+    let inserted: Record<string, unknown> | null = null;
+    dbHolder.db = createMockDb(
+      baseTables({
+        memories: (op) => {
+          if (op.method === "insert") {
+            inserted = op.payload as Record<string, unknown>;
+            return { data: { id: uuid(31) } };
+          }
+          return { data: [] };
+        },
+      }),
+    );
+    anthropicState.queue = [
+      textResponse("act", USAGE),
+      toolUseResponse("remember", { kind: "preference", content: "Dr. Bright prefers espresso.", importance: 4 }),
+      textResponse("Noted and remembered, Doctor."),
+    ];
+
+    const out = await runCommandBrain("remember that I prefer espresso", {
+      db: asDb(dbHolder.db),
+      via: "web",
+    });
+
+    expect(inserted!.kind).toBe("preference");
+    expect(inserted!.content).toBe("Dr. Bright prefers espresso.");
+    expect(out.actions.find((a) => a.tool === "remember")?.detail).toBe(`remember:${uuid(31)}`);
+    expect(out.reply).toContain("remembered");
   });
 });
 

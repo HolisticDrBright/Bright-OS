@@ -6,6 +6,7 @@ import { buildMetricsSummary } from "@/lib/metrics";
 import { composeBriefing } from "@/workers/daily-briefing";
 import { hermesConfigured } from "@/lib/hermes";
 import { env } from "@/lib/env";
+import { MEMORY_KINDS, recallMemories, rememberMemory } from "./brain-memory";
 
 /**
  * The reactor brain's tool belt. Every guardrail here is CODE:
@@ -64,11 +65,25 @@ export const COMMAND_TOOLS: Anthropic.Tool[] = [
   {
     name: "search_memory",
     description:
-      "Search long-term memory: Hermes (full-session recall) plus the local daily memory log. Use for 'what did we learn/decide about X'.",
+      "Search long-term memory: typed memories (semantic recall), the local daily memory log, and Hermes full-session recall. Use for 'what did we learn/decide about X' or anything the operator expects you to remember.",
     input_schema: {
       type: "object",
       properties: { query: { type: "string" } },
       required: ["query"],
+    },
+  },
+  {
+    name: "remember",
+    description:
+      "Save one durable long-term memory — a fact, preference, decision, person, project, lesson, or context that should never be re-asked. Use when the operator says 'remember…' or states something clearly worth keeping. Content must be ONE self-contained third-person sentence. Duplicates are merged automatically.",
+    input_schema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: [...MEMORY_KINDS] },
+        content: { type: "string", description: "One self-contained sentence, third person" },
+        importance: { type: "integer", description: "1 (minor) … 5 (core doctrine/identity)" },
+      },
+      required: ["kind", "content"],
     },
   },
   {
@@ -104,6 +119,24 @@ export async function executeCommandTool(
     }
     case "search_memory":
       return searchMemory(String(input.query ?? ""), ctx);
+    case "remember": {
+      const out = await rememberMemory(
+        ctx.db,
+        { kind: input.kind, content: input.content, importance: input.importance },
+        `tool:${ctx.via}`,
+      );
+      if (!out.stored && out.dedupedAgainst) {
+        return {
+          result: `already known — merged with an existing memory (importance bumped).`,
+          detail: "remember:dedupe",
+        };
+      }
+      if (!out.stored) return { result: `error: ${out.reason}`, detail: "error" };
+      return {
+        result: `remembered [${String(input.kind)}]: ${String(input.content)}`,
+        detail: `remember:${out.id}`,
+      };
+    }
     case "brief": {
       const briefing = await composeBriefing(ctx.db);
       return { result: briefing.markdown, detail: `briefing ${briefing.day}` };
@@ -216,6 +249,12 @@ async function decide(input: ToolInput, ctx: ToolContext) {
 
 async function searchMemory(query: string, ctx: ToolContext) {
   const parts: string[] = [];
+
+  // Typed long-term memories first (semantic when embeddings are configured).
+  const typed = await recallMemories(ctx.db, query, 6).catch(() => []);
+  if (typed.length > 0) {
+    parts.push(`LONG-TERM MEMORIES:\n${typed.map((m) => `· [${m.kind}] ${m.content}`).join("\n")}`);
+  }
 
   const { data: logs } = await ctx.db
     .from("memory_log")

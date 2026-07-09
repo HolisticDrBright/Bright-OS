@@ -42,6 +42,7 @@ export const anthropicState: {
 
 export interface MockDb {
   from: (table: string) => Record<string, unknown>;
+  rpc: (fn: string, args?: unknown) => Record<string, unknown>;
   storage: { from: (bucket: string) => { upload: (path: string, body: unknown, opts?: unknown) => Promise<{ error: { message: string } | null }> } };
   __ops: Op[];
   __uploads: { bucket: string; path: string; bytes: number }[];
@@ -52,8 +53,8 @@ export function createMockDb(
   opts?: { uploadError?: string },
 ): MockDb {
   const ops: Op[] = [];
-  const makeBuilder = (table: string) => {
-    const op: Op = { table, method: "select", filters: [], modifiers: {} };
+  const makeBuilder = (table: string, rpcArgs?: unknown) => {
+    const op: Op = { table, method: "select", filters: [], modifiers: {}, payload: rpcArgs };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const b: any = {};
     const chain = (fn: () => void) => {
@@ -98,6 +99,8 @@ export function createMockDb(
   const uploads: MockDb["__uploads"] = [];
   return {
     from: (table: string) => makeBuilder(table),
+    // Supabase RPCs surface as ops with table `rpc:<fn>` and the args as payload.
+    rpc: (fn: string, args?: unknown) => makeBuilder(`rpc:${fn}`, args),
     storage: {
       from: (bucket: string) => ({
         upload: async (path: string, body: unknown) => {

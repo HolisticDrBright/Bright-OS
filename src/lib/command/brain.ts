@@ -1,24 +1,39 @@
-import Anthropic from "@anthropic-ai/sdk";
+import type Anthropic from "@anthropic-ai/sdk";
 import { env } from "@/lib/env";
 import { checkCostBreaker } from "@/lib/guardrails";
+import { client, logOsSession } from "@/lib/claude/client";
 import { computeCostUsd, sumUsage, type UsageLike } from "@/lib/claude/pricing";
 import { composeBriefing } from "@/workers/daily-briefing";
 import { hermesConfigured, postSessionSummary, research, storeResearchAsTask } from "@/lib/hermes";
+import { loadBrainFile } from "./brain-files";
+import { extractMemories, topMemories } from "./brain-memory";
+import { loadWorkingMemory, renderWorkingMemory, updateWorkingMemory } from "./working-memory";
 import { COMMAND_TOOLS, executeCommandTool } from "./tools";
 import type { CommandContext, CommandEmit, CommandResult } from "./router";
+
+export { __resetAnthropicClient } from "@/lib/claude/client";
 
 /**
  * THE REACTOR BRAIN — natural language → actions.
  *
  * claude-haiku-4-5 does the cheap intent classification; claude-sonnet-5
  * runs the tool-use loop (create_task, decide, query_metrics, search_memory,
- * assign_agent, brief). Guardrails live in code:
+ * remember, assign_agent, brief). Guardrails live in code:
  *  - cost circuit breaker refuses commands over the daily cap
  *  - decide tool refuses medical/regulatory decisions (HUD/Telegram only)
  *  - every call is logged to agent_sessions with REAL token costs
+ *
+ * THE PROMPT IS TWO BLOCKS (prompt caching — see usage.cache_read_input_tokens):
+ *  1. STATIC, cache_control:ephemeral — hardcoded core rules + the editable
+ *     brain files (PERSONALITY.md / SELF.md / KNOWLEDGE.md, hot-reloaded on
+ *     save, vault copy preferred). Cached with the tools; ~90% cheaper after
+ *     the first call in a 5-minute window.
+ *  2. DYNAMIC — working memory (conversation continuity, persisted per
+ *     surface), pinned long-term memories, and the personality checkpoint
+ *     that keeps the voice in character on every single turn.
  */
 
-const SYSTEM_PROMPT = `You are BRIGHT OS, mission control for Dr. Brandon Bright's one-person, multi-brand business run by AI agents with human approval.
+const CORE_RULES = `You are BRIGHT OS ("Jarvis"), mission control for Dr. Brandon Bright's one-person, multi-brand business run by AI agents with human approval.
 
 LANE RULES (non-negotiable — the API enforces them; never work around them):
 - COWORK: analysis and drafts. CODEX: verification and board-keeping. OPENCLAW "JARVIS": execution — exactly ONE narrow WordPress/exec action per task. HERMES: memory and research. ALYSSA (VA): tasks only a human can do.
@@ -27,31 +42,85 @@ LANE RULES (non-negotiable — the API enforces them; never work around them):
 - Medical/regulatory content ALWAYS requires human approval via the HUD or Telegram buttons. The decide tool refuses those — that is a code rule, not your judgment call.
 - Never invent numbers: use query_metrics. Never claim work happened without a task trail.
 
-BRANDS: The Holistic Approach (clinic) + AI Longevity Pro (health app) are the two focus engines. Cron-tier (weekly digest max): Holystic Solutions, Corporate Wellness Program, Health Optimization Program, Longevity Program, Quantum Mind, Soluna, Petwell, Sprout, Bright Digital Solutions.
+VOICE: You have a voice channel. The operator can speak to you (the HUD mic, or Telegram voice notes transcribed to text) and your replies can be read aloud by text-to-speech. Never claim to be text-only or to lack a voice. Because a reply may be spoken, keep it short and easy to say.
 
-VOICE: You have a voice channel. The operator can speak to you (the HUD mic, or Telegram voice notes transcribed to text) and your replies can be read aloud by text-to-speech. Never claim to be text-only or to lack a voice. Because a reply may be spoken, keep it short and easy to say — avoid tables, code blocks, and long bullet lists.
+The sections below — personality, self-knowledge, core knowledge — come from editable files that hot-reload; treat them as part of who you are.`;
 
-STYLE: HUD-terse. Lead with what changed or the answer. Use short lines, real numbers, no filler. When you take an action, state exactly what you did. If a request is ambiguous, ask one sharp question instead of guessing.`;
+/** The anti-drift checkpoint — re-asserted in the dynamic block on EVERY call. */
+const VOICE_CHECK = `VOICE CHECK (every reply, however long the session): stay in character — BRIGHT OS, composed JARVIS register, dry wit, address the operator as "Doctor" where natural. Never generic-assistant voice ("As an AI…", "I'd be happy to…"). Never break character.`;
 
 /**
- * Appended to the system prompt for the CHAT fast-lane: casual, conversational
- * turns that skip the tool loop entirely for a snappy back-and-forth. The hard
- * rule here is safety — with no tools, the model must NOT invent live numbers or
- * claim it did anything. The classifier sends anything that needs a real action
- * or a real metric to the "act" lane instead.
+ * Appended (dynamic block) for the CHAT fast-lane: casual turns that skip the
+ * tool loop for a snappy back-and-forth. The hard rule is safety — with no
+ * tools, the model must NOT invent live numbers or claim it did anything.
  */
-const CHAT_NOTE = `
+const CHAT_NOTE = `CONVERSATIONAL TURN: This is casual conversation — reply directly and briefly, like talking out loud. You have NO tools this turn. Do NOT cite specific live business numbers, task counts, or metrics as if you looked them up, and do NOT claim any task/decision/action happened. If the operator actually wants an action taken or a real figure, tell them to say it plainly (e.g. "create a task…", "how many tasks are open") and the full brain will run it.`;
 
-CONVERSATIONAL TURN: This is casual conversation — reply directly and briefly, like talking out loud. You have NO tools this turn. Do NOT cite specific live business numbers, task counts, or metrics as if you looked them up, and do NOT claim any task/decision/action happened. If the operator actually wants an action taken or a real figure, tell them to say it plainly (e.g. "create a task…", "how many tasks are open") and the full brain will run it.`;
-
-let cachedClient: Anthropic | null = null;
-function client(): Anthropic {
-  if (!cachedClient) cachedClient = new Anthropic({ apiKey: env.anthropicApiKey });
-  return cachedClient;
+/**
+ * Assemble the two-block system prompt. Block 1 is byte-stable between calls
+ * (changes only when a brain file is edited) so it prompt-caches together with
+ * the tool schemas; block 2 carries everything volatile.
+ */
+async function buildSystemBlocks(
+  lane: "chat" | "act",
+  dynamicSections: string[],
+): Promise<Anthropic.TextBlockParam[]> {
+  const [personality, self, knowledge] = await Promise.all([
+    loadBrainFile("PERSONALITY.md"),
+    loadBrainFile("SELF.md"),
+    loadBrainFile("KNOWLEDGE.md"),
+  ]);
+  const staticText = [CORE_RULES, personality.trim(), self.trim(), knowledge.trim()]
+    .filter(Boolean)
+    .join("\n\n");
+  const dynamic = [...dynamicSections, VOICE_CHECK];
+  if (lane === "chat") dynamic.push(CHAT_NOTE);
+  return [
+    { type: "text", text: staticText, cache_control: { type: "ephemeral" } },
+    { type: "text", text: dynamic.join("\n\n") },
+  ];
 }
-/** Test hook. */
-export function __resetAnthropicClient() {
-  cachedClient = null;
+
+/** Working memory + pinned memories for the dynamic block. Never blocks the brain. */
+async function loadDynamicContext(ctx: CommandContext): Promise<string[]> {
+  const sections: string[] = [];
+  try {
+    const [wm, pinned] = await Promise.all([
+      loadWorkingMemory(ctx.db, ctx.via),
+      topMemories(ctx.db, 6),
+    ]);
+    const wmText = renderWorkingMemory(wm);
+    if (wmText) sections.push(wmText);
+    if (pinned.length > 0) {
+      sections.push(
+        `PINNED MEMORIES (highest-importance long-term memories — use search_memory for more):\n${pinned
+          .map((m) => `· [${m.kind}] ${m.content}`)
+          .join("\n")}`,
+      );
+    }
+  } catch {
+    // memory must never take the brain down
+  }
+  return sections;
+}
+
+/**
+ * After-turn memory upkeep, fire-and-forget: append the exchange to working
+ * memory and run the everything-notable extractor. Failures are swallowed —
+ * the reply already shipped. Tests can await __drainBrainTasks().
+ */
+const pendingBrainTasks: Promise<unknown>[] = [];
+function afterTurn(ctx: CommandContext, operatorText: string, reply: string) {
+  const task = Promise.allSettled([
+    updateWorkingMemory(ctx.db, ctx.via, operatorText, reply),
+    extractMemories(ctx.db, { operator: operatorText, reply, via: ctx.via }),
+  ]);
+  pendingBrainTasks.push(task);
+}
+/** Test hook: wait for fire-and-forget memory upkeep to settle. */
+export async function __drainBrainTasks() {
+  const tasks = pendingBrainTasks.splice(0);
+  await Promise.allSettled(tasks);
 }
 
 export type Intent = "research" | "brief" | "chat" | "act";
@@ -89,16 +158,7 @@ async function logSession(
   durationS: number,
   taskId: string | null = null,
 ) {
-  await ctx.db.from("agent_sessions").insert({
-    agent_id: null, // the OS core itself, not a fleet agent
-    task_id: taskId,
-    model,
-    input_tokens: (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0),
-    output_tokens: usage.output_tokens ?? 0,
-    cost_usd: costUsd,
-    duration_s: Math.round(durationS * 100) / 100,
-    started_at: new Date().toISOString(),
-  });
+  await logOsSession(ctx.db, model, usage, costUsd, durationS, taskId);
 }
 
 export async function runCommandBrain(text: string, ctx: CommandContext): Promise<CommandResult> {
@@ -172,12 +232,14 @@ export async function runCommandBrain(text: string, ctx: CommandContext): Promis
     return { reply: briefing.markdown, actions: [{ tool: "brief", detail: briefing.day }], cost_usd: haikuCost };
   }
 
+  const dynamicContext = await loadDynamicContext(ctx);
+
   // CHAT LANE → one tool-less claude-sonnet-5 call (fast conversational reply).
   if (intent === "chat") {
     const response = await client().messages.create({
       model: env.commandModel,
       max_tokens: 1024,
-      system: SYSTEM_PROMPT + CHAT_NOTE,
+      system: await buildSystemBlocks("chat", dynamicContext),
       messages: [{ role: "user", content: trimmed }],
     });
     usage = sumUsage(usage, response.usage);
@@ -188,10 +250,12 @@ export async function runCommandBrain(text: string, ctx: CommandContext): Promis
       .trim();
     const costUsd = haikuCost + computeCostUsd(env.commandModel, usage);
     await logSession(ctx, env.commandModel, usage, costUsd, (Date.now() - started) / 1000);
+    afterTurn(ctx, trimmed, reply);
     return { reply: reply || "…", actions: [], cost_usd: costUsd };
   }
 
-  // ACTION LANE → claude-sonnet-5 tool-use loop.
+  // ACT LANE → claude-sonnet-5 tool-use loop.
+  const systemBlocks = await buildSystemBlocks("act", dynamicContext);
   const actions: CommandResult["actions"] = [];
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: trimmed }];
   let reply = "";
@@ -201,7 +265,7 @@ export async function runCommandBrain(text: string, ctx: CommandContext): Promis
     const response = await client().messages.create({
       model,
       max_tokens: 2048,
-      system: SYSTEM_PROMPT,
+      system: systemBlocks,
       tools: COMMAND_TOOLS,
       messages,
     });
@@ -232,6 +296,7 @@ export async function runCommandBrain(text: string, ctx: CommandContext): Promis
   const costUsd = haikuCost + computeCostUsd(model, usage);
   await logSession(ctx, model, usage, costUsd, (Date.now() - started) / 1000);
   await recordActLane(ctx, trimmed, actions, reply, costUsd);
+  afterTurn(ctx, trimmed, reply);
 
   return { reply: reply || "done (no reply text)", actions, cost_usd: costUsd };
 }
@@ -361,13 +426,15 @@ export async function runCommandBrainStream(
     return finish({ reply: briefing.markdown, actions: [{ tool: "brief", detail: briefing.day }], cost_usd: haikuCost });
   }
 
+  const dynamicContext = await loadDynamicContext(ctx);
+
   // CHAT LANE → one tool-less streamed call. Deltas flow to the HUD, which
   // speaks them sentence-by-sentence for a conversational back-and-forth.
   if (intent === "chat") {
     const stream = client().messages.stream({
       model: env.commandModel,
       max_tokens: 1024,
-      system: SYSTEM_PROMPT + CHAT_NOTE,
+      system: await buildSystemBlocks("chat", dynamicContext),
       messages: [{ role: "user", content: trimmed }],
     });
     let reply = "";
@@ -381,10 +448,12 @@ export async function runCommandBrainStream(
     usage = sumUsage(usage, final.usage);
     const costUsd = haikuCost + computeCostUsd(env.commandModel, usage);
     await logSession(ctx, env.commandModel, usage, costUsd, (Date.now() - started) / 1000);
+    afterTurn(ctx, trimmed, reply.trim());
     return finish({ reply: reply.trim() || "…", actions: [], cost_usd: costUsd });
   }
 
   // ACT LANE → claude-sonnet-5 streamed tool-use loop.
+  const systemBlocks = await buildSystemBlocks("act", dynamicContext);
   const actions: CommandResult["actions"] = [];
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: trimmed }];
   let reply = "";
@@ -395,7 +464,7 @@ export async function runCommandBrainStream(
     const stream = client().messages.stream({
       model,
       max_tokens: 2048,
-      system: SYSTEM_PROMPT,
+      system: systemBlocks,
       tools: COMMAND_TOOLS,
       messages,
     });
@@ -433,6 +502,7 @@ export async function runCommandBrainStream(
   const costUsd = haikuCost + computeCostUsd(model, usage);
   await logSession(ctx, model, usage, costUsd, (Date.now() - started) / 1000);
   await recordActLane(ctx, trimmed, actions, reply, costUsd);
+  afterTurn(ctx, trimmed, reply);
 
   return finish({ reply: reply || "done (no reply text)", actions, cost_usd: costUsd });
 }

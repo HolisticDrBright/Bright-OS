@@ -26,6 +26,12 @@ async function readVaultFile(relPath: string): Promise<string | null> {
   }
 }
 
+/** Write an arbitrary vault document (used for the BrightOS memory digest). */
+export async function writeVaultDoc(relPath: string, content: string): Promise<string | null> {
+  if (!vaultConfigured()) return null;
+  return writeVaultFile(relPath, content);
+}
+
 /** Append a section to the daily note (creates the note if needed). */
 export async function appendToDailyNote(day: string, sectionMd: string): Promise<string | null> {
   if (!vaultConfigured()) return null;
