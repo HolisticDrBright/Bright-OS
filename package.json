@@ -10,6 +10,7 @@
     "workers": "tsx src/workers/index.ts",
     "watcher": "tsx src/watcher/index.ts",
     "seed": "tsx scripts/seed.ts",
+    "voice:check": "tsx scripts/voice-check.ts",
     "import:mcv2": "tsx scripts/import-mcv2.ts",
     "telegram:set-webhook": "tsx scripts/set-telegram-webhook.ts",
     "test": "vitest run",

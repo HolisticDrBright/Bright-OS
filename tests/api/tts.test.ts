@@ -62,4 +62,31 @@ describe("POST /api/tts", () => {
     const res = await TTS(makeReq("http://os/api/tts", { method: "POST", body: { text: "hi" } }));
     expect(res.status).toBe(502);
   });
+
+  it("falls back to tts-1 (sans instructions) when the account lacks the newer model", async () => {
+    authState.actor = HUMAN;
+    process.env.OPENAI_API_KEY = "sk-test";
+    const sent: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: { body: string }) => {
+        const body = JSON.parse(init.body) as Record<string, unknown>;
+        sent.push(body);
+        if (body.model === "gpt-4o-mini-tts") return new Response("model_not_found", { status: 404 });
+        return new Response(new Uint8Array([0x49, 0x44, 0x33]).buffer, {
+          status: 200,
+          headers: { "content-type": "audio/mpeg" },
+        });
+      }),
+    );
+
+    const res = await TTS(makeReq("http://os/api/tts", { method: "POST", body: { text: "Good evening." } }));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-tts-model")).toBe("tts-1");
+    expect(sent).toHaveLength(2);
+    expect(sent[1].model).toBe("tts-1");
+    expect(sent[1].voice).toBe("onyx"); // same voice, older engine
+    expect(sent[1].instructions).toBeUndefined(); // tts-1 rejects the persona param
+  });
 });

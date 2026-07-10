@@ -31,22 +31,36 @@ export async function POST(req: NextRequest) {
   const parsed = schema.safeParse(body);
   if (!parsed.success) return apiError(400, "invalid body", { issues: parsed.error.issues });
 
-  let r: Response;
-  try {
-    r = await fetch("https://api.openai.com/v1/audio/speech", {
+  const render = (model: string) => {
+    const body: Record<string, unknown> = {
+      model,
+      voice: env.ttsVoice,
+      input: parsed.data.text,
+      response_format: "mp3",
+    };
+    // `instructions` (the butler persona) is a gpt-4o-mini-tts feature; the
+    // legacy tts-1 fallback rejects unknown params, so only send it there.
+    if (model.startsWith("gpt-")) body.instructions = env.ttsInstructions;
+    return fetch("https://api.openai.com/v1/audio/speech", {
       method: "POST",
       headers: {
         authorization: `Bearer ${env.openaiApiKey}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({
-        model: env.ttsModel,
-        voice: env.ttsVoice,
-        input: parsed.data.text,
-        instructions: env.ttsInstructions,
-        response_format: "mp3",
-      }),
+      body: JSON.stringify(body),
     });
+  };
+
+  let servedModel = env.ttsModel;
+  let r: Response;
+  try {
+    r = await render(env.ttsModel);
+    // Some accounts lack access to the newer TTS model — fall back to tts-1
+    // (available everywhere) rather than dumping the HUD to the robot voice.
+    if (!r.ok && [400, 403, 404].includes(r.status) && env.ttsModel !== "tts-1") {
+      servedModel = "tts-1";
+      r = await render("tts-1");
+    }
   } catch (e) {
     return apiError(502, `TTS provider unreachable: ${e instanceof Error ? e.message : e}`);
   }
@@ -64,6 +78,7 @@ export async function POST(req: NextRequest) {
       "content-type": "audio/mpeg",
       "cache-control": "no-store, no-transform",
       "x-accel-buffering": "no",
+      "x-tts-model": servedModel,
     },
   });
 }
