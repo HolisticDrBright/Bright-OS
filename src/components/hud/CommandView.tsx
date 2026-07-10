@@ -242,14 +242,27 @@ export default function CommandView(ctx: ViewCtx) {
           finishUtterance();
           return;
         }
-        // Cloud voice unavailable — degrade to the browser voice for the rest
-        // of the session and note it once so the user knows why.
+        // Cloud voice unavailable — degrade to the browser voice and say
+        // EXACTLY why, once, so a broken key/quota is diagnosable from chat.
         voiceModeRef.current = "browser";
         if (!voiceWarnedRef.current) {
           voiceWarnedRef.current = true;
+          let reason = res ? `HTTP ${res.status}` : "network error";
+          if (res) {
+            try {
+              const body = (await res.json()) as { error?: string; detail?: string };
+              if (body.error) reason = `${res.status}: ${body.error}${body.detail ? ` — ${body.detail}` : ""}`;
+            } catch {
+              /* body wasn't JSON */
+            }
+          }
           setChat((c) => [
             ...c,
-            { who: "os", text: "⚠ Jarvis voice needs OPENAI_API_KEY in .env — using the browser voice for now.", id: idRef.current++ },
+            {
+              who: "os",
+              text: `⚠ Jarvis voice offline (${reason}). Falling back to the robotic browser voice. Fix: check OPENAI_API_KEY in .env, restart npm run dev, then toggle 🔊 VOICE off and on to retry.`,
+              id: idRef.current++,
+            },
           ]);
         }
         speakBrowser(clean);
@@ -669,8 +682,15 @@ export default function CommandView(ctx: ViewCtx) {
               onClick={() => {
                 const next = !speak;
                 setSpeak(next);
-                if (!next) resetSpeech();
-                else enqueueSpeech("Systems online, Doctor. Standing by.");
+                if (!next) {
+                  resetSpeech();
+                } else {
+                  // Re-arm the cloud voice on every enable (e.g. after fixing
+                  // the key) and let the greeting act as the live self-test.
+                  voiceModeRef.current = "onyx";
+                  voiceWarnedRef.current = false;
+                  enqueueSpeech("Systems online, Doctor. Standing by.");
+                }
               }}
               style={{ cursor: "pointer", padding: "5px 10px", border: `1px solid ${speak ? "rgba(61,245,166,.5)" : "rgba(94,122,147,.4)"}`, borderRadius: 5, fontFamily: F.rajdhani, fontWeight: 700, fontSize: 10, letterSpacing: ".14em", color: speak ? C.green : C.dim }}
               title="Read replies aloud in the Jarvis voice (OpenAI onyx; falls back to the browser voice if no key)"
