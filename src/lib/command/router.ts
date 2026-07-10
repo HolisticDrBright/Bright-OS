@@ -29,11 +29,18 @@ export type CommandContext = {
  *  - done:   the final, authoritative result (replaces streamed text).
  *  - error:  the brain threw.
  */
+/** Where the milliseconds went, measured server-side per turn. */
+export interface CommandTimings {
+  classify_ms?: number; // haiku intent routing
+  first_delta_ms?: number; // request start → first streamed text token
+  total_ms: number; // request start → done
+}
+
 export type StreamEvent =
   | { type: "status"; text: string; lane?: string }
   | { type: "delta"; text: string }
   | { type: "action"; tool: string; detail: string }
-  | { type: "done"; reply: string; actions: CommandResult["actions"]; cost_usd: number }
+  | { type: "done"; reply: string; actions: CommandResult["actions"]; cost_usd: number; timings?: CommandTimings }
   | { type: "error"; message: string };
 
 export type CommandEmit = (e: StreamEvent) => void;

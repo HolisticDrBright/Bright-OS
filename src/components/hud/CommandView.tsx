@@ -14,6 +14,8 @@ interface ChatMsg {
   who: "you" | "os";
   text: string;
   id: number;
+  meta?: string; // latency + cost line ("text 0.9s · total 3.2s · $0.0121")
+  voiceMeta?: string; // "voice 1.4s" — patched in when the first audio starts
 }
 
 /** Strip HUD glyphs + the cost tag so text-to-speech reads clean prose. */
@@ -22,8 +24,7 @@ function stripForSpeech(raw: string): string {
     .replace(/\[\$[\d.]+\]/g, "") // drop the cost tag
     .replace(/[*_#`>⌁◈▸✔✕◇⚑⤴●◉⚠⛔⚕]/g, "")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 600);
+    .trim();
 }
 
 export default function CommandView(ctx: ViewCtx) {
@@ -39,6 +40,7 @@ export default function CommandView(ctx: ViewCtx) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [anim, setAnim] = useState<Record<string, "approved" | "rejected">>({});
   const [speak, setSpeak] = useState(false);
+  const [convo, setConvo] = useState(false); // conversation mode: auto re-listen after each reply
   const chatEndRef = useRef<HTMLDivElement>(null);
   const idRef = useRef(1); // stable ids so streaming updates the right bubble
   const speakCountRef = useRef(0); // utterances still queued/speaking
@@ -47,8 +49,15 @@ export default function CommandView(ctx: ViewCtx) {
   const genRef = useRef(0); // bumped on every stop; invalidates queued speech
   const audioRef = useRef<HTMLAudioElement | null>(null); // reused player for the cloud voice
   const ttsChainRef = useRef<Promise<void>>(Promise.resolve()); // keeps cloud clips in order
+  const ttsAbortRef = useRef(new AbortController()); // cancels in-flight TTS renders
   const voiceModeRef = useRef<"onyx" | "browser">("onyx"); // degrade to browser on failure
   const voiceWarnedRef = useRef(false); // warn once if the Jarvis voice is unavailable
+  const convoRef = useRef(false); // mirror of `convo` for callbacks
+  const thinkingRef = useRef(false); // mirror of `thinking` — gates mic resume
+  const recRef = useRef<{ cancel: () => void } | null>(null); // active recognition session
+  const interimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // end-of-turn window
+  const latencyRef = useRef<{ osId: number; t0: number; firstDelta: number; firstAudioDone: boolean } | null>(null);
+  const resumeRef = useRef<() => void>(() => {}); // conversation-mode re-listen hook
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -70,13 +79,17 @@ export default function CommandView(ctx: ViewCtx) {
   }, [speak]);
 
   // TTS — read the reactor brain's replies aloud in the "Jarvis" voice.
-  // Primary path streams MP3 from /api/tts (OpenAI onyx + butler persona);
-  // if that's unavailable (e.g. no OPENAI_API_KEY) it degrades to the browser's
-  // built-in speech. Utterances/clips play in order, so we can speak
-  // sentence-by-sentence as a reply streams. The orb glows gold while speaking.
+  // Primary path streams MP3 from /api/tts (OpenAI onyx + butler persona) and
+  // plays it PROGRESSIVELY via MediaSource — the first word is audible on the
+  // first audio chunk, not after the whole clip renders. Clips are prefetched
+  // in parallel while the previous one plays, so sentences run gap-free. If the
+  // cloud voice is unavailable it degrades to the browser's speech synthesis.
   const finishUtterance = useCallback(() => {
     speakCountRef.current = Math.max(0, speakCountRef.current - 1);
-    if (speakCountRef.current === 0) setOrb((o) => (o === "speaking" ? "idle" : o));
+    if (speakCountRef.current === 0) {
+      setOrb((o) => (o === "speaking" ? "idle" : o));
+      resumeRef.current(); // conversation mode: hand the mic back
+    }
   }, []);
 
   const speakBrowser = useCallback(
@@ -95,21 +108,99 @@ export default function CommandView(ctx: ViewCtx) {
     [finishUtterance],
   );
 
-  const playAudio = useCallback(
-    (blob: Blob) =>
+  // Latency mark: when the first audio of a reply actually starts playing.
+  const markFirstAudio = useCallback(() => {
+    const lat = latencyRef.current;
+    if (!lat || lat.firstAudioDone) return;
+    lat.firstAudioDone = true;
+    const s = ((performance.now() - lat.t0) / 1000).toFixed(1);
+    setChat((c) => c.map((m) => (m.id === lat.osId ? { ...m, voiceMeta: `voice ${s}s` } : m)));
+  }, []);
+
+  // Progressive playback: append MP3 chunks into a MediaSource buffer as they
+  // arrive from /api/tts. Falls back to buffered-blob playback where
+  // MediaSource can't take audio/mpeg. Always resolves (60s safety net) so the
+  // clip chain can never wedge.
+  const playStreamingAudio = useCallback(
+    (res: Response) =>
       new Promise<void>((resolve) => {
         let el = audioRef.current;
         if (!el) {
           el = new Audio();
           audioRef.current = el;
         }
-        const url = URL.createObjectURL(blob);
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const finish = () => {
+          if (timer) clearTimeout(timer);
+          timer = null;
+          resolve();
+        };
+        timer = setTimeout(finish, 60_000);
+
+        const MS = typeof window !== "undefined" ? window.MediaSource : undefined;
+        if (!MS || !MS.isTypeSupported("audio/mpeg") || !res.body) {
+          void res
+            .blob()
+            .then((b) => {
+              const url = URL.createObjectURL(b);
+              const done = () => {
+                URL.revokeObjectURL(url);
+                finish();
+              };
+              el.onended = done;
+              el.onerror = done;
+              el.src = url;
+              void el.play().catch(done);
+            })
+            .catch(finish);
+          return;
+        }
+
+        const ms = new MS();
+        const url = URL.createObjectURL(ms);
         const done = () => {
           URL.revokeObjectURL(url);
-          resolve();
+          finish();
         };
         el.onended = done;
         el.onerror = done;
+        ms.addEventListener(
+          "sourceopen",
+          () => {
+            let sb: SourceBuffer;
+            try {
+              sb = ms.addSourceBuffer("audio/mpeg");
+            } catch {
+              done();
+              return;
+            }
+            const reader = res.body!.getReader();
+            const pump = async (): Promise<void> => {
+              const { value, done: eof } = await reader.read();
+              if (eof) {
+                try {
+                  if (ms.readyState === "open") ms.endOfStream();
+                } catch {
+                  /* already closed */
+                }
+                return;
+              }
+              await new Promise<void>((r) => {
+                sb.addEventListener("updateend", () => r(), { once: true });
+                sb.appendBuffer(value);
+              });
+              return pump();
+            };
+            pump().catch(() => {
+              try {
+                if (ms.readyState === "open") ms.endOfStream();
+              } catch {
+                /* already closed */
+              }
+            });
+          },
+          { once: true },
+        );
         el.src = url;
         void el.play().catch(done);
       }),
@@ -127,50 +218,51 @@ export default function CommandView(ctx: ViewCtx) {
         return;
       }
       const myGen = genRef.current;
+      // PREFETCH: start rendering this clip NOW, in parallel with whatever is
+      // playing — kills the synthesis gap between sentences.
+      const fetchP = fetch("/api/tts", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: clean }),
+        signal: ttsAbortRef.current.signal,
+      }).catch(() => null);
       ttsChainRef.current = ttsChainRef.current.then(async () => {
         if (genRef.current !== myGen) {
           finishUtterance();
           return;
         }
-        try {
-          const res = await fetch("/api/tts", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ text: clean }),
-          });
-          if (!res.ok) throw new Error(`tts ${res.status}`);
-          const blob = await res.blob();
-          if (genRef.current !== myGen) {
-            finishUtterance();
-            return;
-          }
-          await playAudio(blob);
+        const res = await fetchP;
+        if (genRef.current !== myGen) {
           finishUtterance();
-        } catch {
-          // Cloud voice unavailable — degrade to the browser voice for the rest
-          // of the session and note it once so the user knows why.
-          voiceModeRef.current = "browser";
-          if (!voiceWarnedRef.current) {
-            voiceWarnedRef.current = true;
-            setChat((c) => [
-              ...c,
-              { who: "os", text: "⚠ Jarvis voice needs OPENAI_API_KEY in .env — using the browser voice for now.", id: idRef.current++ },
-            ]);
-          }
-          if (genRef.current !== myGen) {
-            finishUtterance();
-            return;
-          }
-          speakBrowser(clean);
+          return;
         }
+        if (res && res.ok) {
+          markFirstAudio();
+          await playStreamingAudio(res);
+          finishUtterance();
+          return;
+        }
+        // Cloud voice unavailable — degrade to the browser voice for the rest
+        // of the session and note it once so the user knows why.
+        voiceModeRef.current = "browser";
+        if (!voiceWarnedRef.current) {
+          voiceWarnedRef.current = true;
+          setChat((c) => [
+            ...c,
+            { who: "os", text: "⚠ Jarvis voice needs OPENAI_API_KEY in .env — using the browser voice for now.", id: idRef.current++ },
+          ]);
+        }
+        speakBrowser(clean);
       });
     },
-    [speakBrowser, playAudio, finishUtterance],
+    [speakBrowser, playStreamingAudio, finishUtterance, markFirstAudio],
   );
 
-  // Hard stop: cancel in-flight speech, drop the queue, clear the buffer.
+  // Hard stop: cancel in-flight speech + renders, drop the queue, clear buffers.
   const resetSpeech = useCallback(() => {
     genRef.current += 1; // invalidate anything queued/in-flight
+    ttsAbortRef.current.abort(); // cancel in-flight TTS renders
+    ttsAbortRef.current = new AbortController();
     if (typeof window !== "undefined") window.speechSynthesis?.cancel();
     const el = audioRef.current;
     if (el) {
@@ -209,7 +301,7 @@ export default function CommandView(ctx: ViewCtx) {
   // cloud voice starts fast and each request stays a sensible length.
   const speakChunked = useCallback(
     (raw: string) => {
-      const clean = stripForSpeech(raw);
+      const clean = stripForSpeech(raw).slice(0, 2400); // spoken cap; full text stays on screen
       if (!clean) return;
       const parts = clean.match(/[^.!?…]+[.!?…]*\s*/g) ?? [clean];
       let buf = "";
@@ -229,15 +321,17 @@ export default function CommandView(ctx: ViewCtx) {
   const sendCmd = useCallback(
     async (raw: string, via: "web" | "voice" = "web") => {
       const text = raw.trim();
-      if (!text || thinking) return;
+      if (!text || thinkingRef.current) return;
       const youId = idRef.current++;
       const osId = idRef.current++;
       setChat((c) => [...c, { who: "you", text, id: youId }, { who: "os", text: "", id: osId }]);
       setCmdInput("");
+      thinkingRef.current = true;
       setThinking(true);
       chime(sound, 740, 0.15);
       if (speak) resetSpeech();
       laneRef.current = "";
+      latencyRef.current = { osId, t0: performance.now(), firstDelta: 0, firstAudioDone: false };
       let streamed = "";
       try {
         const out = await hud.sendCommandStream(text, via, {
@@ -245,59 +339,167 @@ export default function CommandView(ctx: ViewCtx) {
             if (lane) laneRef.current = lane;
           },
           onDelta: (delta) => {
+            const lat = latencyRef.current;
+            if (lat && !lat.firstDelta) lat.firstDelta = performance.now();
             streamed += delta;
             setChat((c) => c.map((m) => (m.id === osId ? { ...m, text: streamed } : m)));
-            // Only the conversational lane speaks live; the act lane speaks its
-            // final reply once (below) so it never reads tool-loop chatter aloud.
-            if (speak && laneRef.current === "chat") {
+            // The conversational lanes speak live, sentence by sentence; the act
+            // lane speaks its final reply once so it never reads tool chatter.
+            if (speak && (laneRef.current === "chat" || laneRef.current === "bye")) {
               pendingRef.current += delta;
               flushSentences(false);
             }
           },
         });
-        const cost = out.cost_usd > 0 ? `\n[$${out.cost_usd.toFixed(4)}]` : "";
-        setChat((c) => c.map((m) => (m.id === osId ? { ...m, text: `${out.reply}${cost}` } : m)));
+        // Latency line: where the milliseconds went, per reply. This is the
+        // before/after instrument — watch it drop as tiers land.
+        const lat = latencyRef.current;
+        const metaParts: string[] = [];
+        if (out.timings?.classify_ms) metaParts.push(`route ${(out.timings.classify_ms / 1000).toFixed(1)}s`);
+        if (lat?.firstDelta) metaParts.push(`text ${((lat.firstDelta - lat.t0) / 1000).toFixed(1)}s`);
+        if (lat) metaParts.push(`total ${((performance.now() - lat.t0) / 1000).toFixed(1)}s`);
+        if (out.cost_usd > 0) metaParts.push(`$${out.cost_usd.toFixed(4)}`);
+        setChat((c) => c.map((m) => (m.id === osId ? { ...m, text: out.reply, meta: metaParts.join(" · ") } : m)));
         if (speak) {
-          if (laneRef.current === "chat") flushSentences(true);
+          if (laneRef.current === "chat" || laneRef.current === "bye") flushSentences(true);
           else speakChunked(out.reply);
         }
       } finally {
+        thinkingRef.current = false;
         setThinking(false);
+        // Conversation mode: if nothing is queued to speak, hand the mic back
+        // now; otherwise finishUtterance resumes when the voice goes quiet.
+        if (speakCountRef.current === 0) resumeRef.current();
       }
     },
-    [hud, sound, thinking, speak, resetSpeech, flushSentences, speakChunked],
+    [hud, sound, speak, resetSpeech, flushSentences, speakChunked],
   );
 
-  // ◉ VOICE — browser speech recognition feeding the same brain
-  const orbClick = useCallback(() => {
-    if (orb !== "idle") {
-      setOrb("idle");
-      return;
-    }
+  // ◉ mic — interim results with our own 850ms end-of-turn window, so the loop
+  // stops waiting on the browser's slow endpointing. Shows the live transcript
+  // in the input line while you talk.
+  const startListening = useCallback(() => {
+    if (recRef.current || thinkingRef.current) return;
     const w = window as unknown as { webkitSpeechRecognition?: new () => SpeechRecognitionLike; SpeechRecognition?: new () => SpeechRecognitionLike };
     const Ctor = w.SpeechRecognition ?? w.webkitSpeechRecognition;
-    chime(sound, 880, 0.18);
     if (!Ctor) {
-      setOrb("listening");
-      setTimeout(() => setOrb("speaking"), 2600);
-      setTimeout(() => setOrb("idle"), 4400);
-      setChat((c) => [...c, { who: "os", text: "Voice input isn't supported in this browser — type instead, or send a voice note to the Telegram bot.", id: idRef.current++ }]);
+      convoRef.current = false;
+      setConvo(false);
+      setChat((c) => [...c, { who: "os", text: "Voice input isn't supported in this browser — use Edge or Chrome, or send a voice note to the Telegram bot.", id: idRef.current++ }]);
       return;
     }
     const rec = new Ctor();
     rec.lang = "en-US";
-    rec.interimResults = false;
+    rec.interimResults = true; // live transcript + our own end-of-turn detection
+    rec.continuous = false;
+    let lastText = "";
+    let finalSent = false;
+    let cancelled = false;
+    const clearStability = () => {
+      if (interimTimerRef.current) clearTimeout(interimTimerRef.current);
+      interimTimerRef.current = null;
+    };
+    const deliver = () => {
+      if (finalSent || cancelled) return;
+      finalSent = true;
+      clearStability();
+      recRef.current = null;
+      setOrb((o) => (o === "listening" ? "idle" : o));
+      setCmdInput("");
+      if (lastText.trim()) void sendCmd(lastText.trim(), "voice");
+    };
+    recRef.current = {
+      cancel: () => {
+        cancelled = true;
+        clearStability();
+        try {
+          rec.stop();
+        } catch {
+          /* ignore */
+        }
+      },
+    };
     setOrb("listening");
     rec.onresult = (e) => {
-      const transcript = e.results[0]?.[0]?.transcript ?? "";
-      setOrb("speaking");
-      setTimeout(() => setOrb("idle"), 1200);
-      if (transcript) void sendCmd(transcript, "voice");
+      let acc = "";
+      let isFinal = false;
+      for (let i = 0; i < e.results.length; i++) {
+        acc += e.results[i][0]?.transcript ?? "";
+        if (e.results[i].isFinal) isFinal = true;
+      }
+      lastText = acc;
+      setCmdInput(acc); // live transcript while you speak
+      clearStability();
+      if (isFinal) {
+        try {
+          rec.stop();
+        } catch {
+          /* ignore */
+        }
+        deliver();
+        return;
+      }
+      // END-OF-TURN SHARPENING: interim text unchanged for 850ms → you're done
+      // talking; stop waiting for the browser's endpointer.
+      if (acc.trim()) {
+        interimTimerRef.current = setTimeout(() => {
+          try {
+            rec.stop();
+          } catch {
+            /* ignore */
+          }
+          deliver();
+        }, 850);
+      }
     };
-    rec.onerror = () => setOrb("idle");
-    rec.onend = () => setOrb((o) => (o === "listening" ? "idle" : o));
+    rec.onerror = () => {
+      clearStability();
+      recRef.current = null;
+      setOrb((o) => (o === "listening" ? "idle" : o));
+    };
+    rec.onend = () => {
+      recRef.current = null;
+      setOrb((o) => (o === "listening" ? "idle" : o));
+      deliver(); // browser finalized without an isFinal result — use the stable interim
+    };
     rec.start();
-  }, [orb, sound, sendCmd]);
+  }, [sendCmd]);
+
+  // Conversation mode: after each reply finishes (spoken or not), re-open the
+  // mic — unless the operator said goodbye, in which case the loop ends and
+  // the OS does NOT take the last word.
+  useEffect(() => {
+    resumeRef.current = () => {
+      if (!convoRef.current || thinkingRef.current || recRef.current) return;
+      if (laneRef.current === "bye") {
+        convoRef.current = false;
+        setConvo(false);
+        return;
+      }
+      startListening();
+    };
+  });
+
+  // ◉ VOICE — toggles the conversation loop.
+  const orbClick = useCallback(() => {
+    chime(sound, 880, 0.18);
+    if (recRef.current) {
+      // listening → stop and leave conversation mode
+      convoRef.current = false;
+      setConvo(false);
+      recRef.current.cancel();
+      recRef.current = null;
+      setOrb("idle");
+      return;
+    }
+    if (orb === "speaking") {
+      resetSpeech(); // interrupt the voice; conversation mode resumes listening
+      return;
+    }
+    convoRef.current = true;
+    setConvo(true);
+    startListening();
+  }, [orb, sound, resetSpeech, startListening]);
 
   const decide = useCallback(
     async (d: DecisionVM, action: "approve" | "reject" | "discuss") => {
@@ -427,13 +629,18 @@ export default function CommandView(ctx: ViewCtx) {
         {/* command chat */}
         <div className="hud-panel hud-corners hud-corners-tl-only" style={{ padding: 10, display: "flex", flexDirection: "column", gap: 8, maxHeight: 220 }}>
           <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, maxHeight: 140 }}>
-            {chat.map((m) => (
+            {chat.slice(-60).map((m) => (
               <div key={m.id} style={{ alignSelf: m.who === "you" ? "flex-end" : "flex-start", maxWidth: "82%", padding: "7px 11px", borderRadius: 7, border: `1px solid ${m.who === "you" ? "rgba(255,184,77,.35)" : "rgba(0,212,255,.25)"}`, background: m.who === "you" ? "rgba(255,184,77,.07)" : "rgba(0,212,255,.06)", fontSize: 12, lineHeight: 1.5, color: "#D8EAF7", whiteSpace: "pre-wrap", animation: "fadeUp .3s ease-out both" }}>
                 <span style={{ fontFamily: F.rajdhani, fontWeight: 700, fontSize: 9.5, letterSpacing: ".18em", color: m.who === "you" ? C.gold : C.cyan }}>
                   {m.who === "you" ? "DR. BRIGHT" : "BRIGHT OS"}
                 </span>
                 <br />
                 {m.text || (m.who === "os" ? "▌" : "")}
+                {(m.meta || m.voiceMeta) && (
+                  <div style={{ marginTop: 5, fontFamily: F.mono, fontSize: 9, color: C.dim }}>
+                    {[m.meta, m.voiceMeta].filter(Boolean).join(" · ")}
+                  </div>
+                )}
               </div>
             ))}
             {thinking && (
@@ -455,8 +662,8 @@ export default function CommandView(ctx: ViewCtx) {
             <div onClick={() => void sendCmd(cmdInput)} className="btn-cyan" style={{ cursor: "pointer", padding: "5px 14px", border: "1px solid rgba(0,212,255,.5)", borderRadius: 5, fontFamily: F.rajdhani, fontWeight: 700, fontSize: 11, letterSpacing: ".16em", color: C.cyan }}>
               EXEC
             </div>
-            <div onClick={orbClick} className="btn-cyan" style={{ cursor: "pointer", padding: "5px 10px", border: "1px solid rgba(0,212,255,.4)", borderRadius: 5, fontFamily: F.rajdhani, fontWeight: 700, fontSize: 10, letterSpacing: ".14em", color: C.cyan }}>
-              ◉ VOICE
+            <div onClick={orbClick} className="btn-cyan" style={{ cursor: "pointer", padding: "5px 10px", border: `1px solid ${convo ? "rgba(155,232,255,.7)" : "rgba(0,212,255,.4)"}`, borderRadius: 5, fontFamily: F.rajdhani, fontWeight: 700, fontSize: 10, letterSpacing: ".14em", color: convo ? C.arc : C.cyan }} title="Conversation mode: keeps listening after each reply; say goodbye to end it">
+              {convo ? "◉ CONVO ON" : "◉ VOICE"}
             </div>
             <div
               onClick={() => {
@@ -608,8 +815,10 @@ export default function CommandView(ctx: ViewCtx) {
 interface SpeechRecognitionLike {
   lang: string;
   interimResults: boolean;
-  onresult: ((e: { results: { [i: number]: { [j: number]: { transcript: string } } } }) => void) | null;
+  continuous: boolean;
+  onresult: ((e: { results: ArrayLike<{ isFinal: boolean; 0?: { transcript: string } }> }) => void) | null;
   onerror: (() => void) | null;
   onend: (() => void) | null;
   start: () => void;
+  stop: () => void;
 }

@@ -51,13 +51,19 @@ export async function POST(req: NextRequest) {
     return apiError(502, `TTS provider unreachable: ${e instanceof Error ? e.message : e}`);
   }
 
-  if (!r.ok) {
+  if (!r.ok || !r.body) {
     const detail = await r.text().catch(() => "");
     return apiError(502, `TTS provider error ${r.status}`, { detail: detail.slice(0, 300) });
   }
 
-  const audio = await r.arrayBuffer();
-  return new Response(audio, {
-    headers: { "content-type": "audio/mpeg", "cache-control": "no-store" },
+  // Stream the MP3 through as it renders — the first audio bytes reach the
+  // browser in ~the provider's time-to-first-byte instead of after the whole
+  // clip is synthesized. The HUD plays it progressively via MediaSource.
+  return new Response(r.body, {
+    headers: {
+      "content-type": "audio/mpeg",
+      "cache-control": "no-store, no-transform",
+      "x-accel-buffering": "no",
+    },
   });
 }

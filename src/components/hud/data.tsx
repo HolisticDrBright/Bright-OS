@@ -44,6 +44,7 @@ export interface CommandReply {
   reply: string;
   actions: { tool: string; detail: string }[];
   cost_usd: number;
+  timings?: { classify_ms?: number; first_delta_ms?: number; total_ms: number };
 }
 
 /** Callbacks fed by the /api/command/stream NDJSON events as they arrive. */
@@ -241,6 +242,7 @@ export function HudDataProvider({ children }: { children: React.ReactNode }) {
               reply: (evt.reply as string) ?? "",
               actions: (evt.actions as CommandReply["actions"]) ?? [],
               cost_usd: (evt.cost_usd as number) ?? 0,
+              timings: evt.timings as CommandReply["timings"],
             };
           else if (evt.type === "error")
             final = { reply: `⚠ ${(evt.message as string) ?? "command failed"}`, actions: [], cost_usd: 0 };

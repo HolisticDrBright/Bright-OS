@@ -9,7 +9,7 @@ import { loadBrainFile } from "./brain-files";
 import { extractMemories, topMemories } from "./brain-memory";
 import { loadWorkingMemory, renderWorkingMemory, updateWorkingMemory } from "./working-memory";
 import { COMMAND_TOOLS, executeCommandTool } from "./tools";
-import type { CommandContext, CommandEmit, CommandResult } from "./router";
+import type { CommandContext, CommandEmit, CommandResult, CommandTimings } from "./router";
 
 export { __resetAnthropicClient } from "@/lib/claude/client";
 
@@ -57,12 +57,18 @@ const VOICE_CHECK = `VOICE CHECK (every reply, however long the session): stay i
 const CHAT_NOTE = `CONVERSATIONAL TURN: This is casual conversation — reply directly and briefly, like talking out loud. You have NO tools this turn. Do NOT cite specific live business numbers, task counts, or metrics as if you looked them up, and do NOT claim any task/decision/action happened. If the operator actually wants an action taken or a real figure, tell them to say it plainly (e.g. "create a task…", "how many tasks are open") and the full brain will run it.`;
 
 /**
+ * The goodbye lane: when the operator is signing off, the OS must NOT take
+ * the last word — no follow-up questions, no "anything else?", no new topics.
+ */
+const SIGN_OFF_NOTE = `SIGN-OFF TURN: The operator is ending the conversation. Reply with ONE short, warm sign-off in character — at most 8 words (e.g. "Goodnight, Doctor." / "Until tomorrow, Doctor."). NO questions, NO "anything else?", NO new topics, NO status updates. Let the operator have the last word.`;
+
+/**
  * Assemble the two-block system prompt. Block 1 is byte-stable between calls
  * (changes only when a brain file is edited) so it prompt-caches together with
  * the tool schemas; block 2 carries everything volatile.
  */
 async function buildSystemBlocks(
-  lane: "chat" | "act",
+  lane: "chat" | "act" | "bye",
   dynamicSections: string[],
 ): Promise<Anthropic.TextBlockParam[]> {
   const [personality, self, knowledge] = await Promise.all([
@@ -75,6 +81,7 @@ async function buildSystemBlocks(
     .join("\n\n");
   const dynamic = [...dynamicSections, VOICE_CHECK];
   if (lane === "chat") dynamic.push(CHAT_NOTE);
+  if (lane === "bye") dynamic.push(SIGN_OFF_NOTE);
   return [
     { type: "text", text: staticText, cache_control: { type: "ephemeral" } },
     { type: "text", text: dynamic.join("\n\n") },
@@ -123,7 +130,7 @@ export async function __drainBrainTasks() {
   await Promise.allSettled(tasks);
 }
 
-export type Intent = "research" | "brief" | "chat" | "act";
+export type Intent = "research" | "brief" | "chat" | "bye" | "act";
 
 /** Cheap classification lane (claude-haiku-4-5). */
 export async function classifyIntent(text: string): Promise<{ intent: Intent; usage: UsageLike }> {
@@ -131,7 +138,7 @@ export async function classifyIntent(text: string): Promise<{ intent: Intent; us
     model: env.classifyModel,
     max_tokens: 8,
     system:
-      'Classify the operator\'s message into exactly one word:\n"research" — asking to research/investigate/find external information about a topic\n"brief" — asking for the status rundown/briefing/summary of the business\n"chat" — casual conversation: greetings, opinions, small talk, or questions about you and what you can do — needs NO action and NO live business data\n"act" — needs a real action (create/assign/approve/move a task or decision) OR any real business number, metric, or memory lookup\nWhen unsure between "chat" and "act", choose "act".\nReply with ONLY the single word.',
+      'Classify the operator\'s message into exactly one word:\n"research" — asking to research/investigate/find external information about a topic\n"brief" — asking for the status rundown/briefing/summary of the business\n"bye" — the operator is ENDING the conversation: goodbye, goodnight, "thanks, that\'s all", "we\'re done", signing off\n"chat" — casual conversation: greetings, opinions, small talk, or questions about you and what you can do — needs NO action and NO live business data\n"act" — needs a real action (create/assign/approve/move a task or decision) OR any real business number, metric, or memory lookup\nWhen unsure between "chat" and "act", choose "act". A thanks that also asks for something is NOT "bye".\nReply with ONLY the single word.',
     messages: [{ role: "user", content: text }],
   });
   const word = response.content
@@ -144,9 +151,11 @@ export async function classifyIntent(text: string): Promise<{ intent: Intent; us
     ? "research"
     : word.includes("brief")
       ? "brief"
-      : word.includes("chat")
-        ? "chat"
-        : "act"; // default/ambiguous → the guardrailed tool lane, never the tool-less chat lane
+      : word.includes("bye")
+        ? "bye"
+        : word.includes("chat")
+          ? "chat"
+          : "act"; // default/ambiguous → the guardrailed tool lane, never the tool-less chat lane
   return { intent, usage: response.usage };
 }
 
@@ -234,12 +243,12 @@ export async function runCommandBrain(text: string, ctx: CommandContext): Promis
 
   const dynamicContext = await loadDynamicContext(ctx);
 
-  // CHAT LANE → one tool-less claude-sonnet-5 call (fast conversational reply).
-  if (intent === "chat") {
+  // CHAT/BYE LANE → one tool-less claude-sonnet-5 call (fast conversational reply).
+  if (intent === "chat" || intent === "bye") {
     const response = await client().messages.create({
       model: env.commandModel,
-      max_tokens: 1024,
-      system: await buildSystemBlocks("chat", dynamicContext),
+      max_tokens: intent === "bye" ? 64 : 1024,
+      system: await buildSystemBlocks(intent, dynamicContext),
       messages: [{ role: "user", content: trimmed }],
     });
     usage = sumUsage(usage, response.usage);
@@ -326,7 +335,7 @@ async function recordActLane(
 function laneStatus(intent: Intent, researchQuery: string | null): string {
   if (researchQuery) return "HERMES researching…";
   if (intent === "brief") return "composing briefing…";
-  if (intent === "chat") return "…";
+  if (intent === "chat" || intent === "bye") return "…";
   return "thinking…";
 }
 
@@ -347,8 +356,16 @@ export async function runCommandBrainStream(
 ): Promise<CommandResult> {
   const started = Date.now();
   const trimmed = text.trim();
-  const finish = (r: CommandResult): CommandResult => {
-    emit({ type: "done", reply: r.reply, actions: r.actions, cost_usd: r.cost_usd });
+  // Latency instrumentation: every done event carries where the ms went.
+  let classifyMs: number | undefined;
+  let firstDeltaMs: number | undefined;
+  const finish = (r: CommandResult, withLaneTimings = false): CommandResult => {
+    const timings: CommandTimings = { total_ms: Date.now() - started };
+    if (withLaneTimings) {
+      timings.classify_ms = classifyMs;
+      timings.first_delta_ms = firstDeltaMs;
+    }
+    emit({ type: "done", reply: r.reply, actions: r.actions, cost_usd: r.cost_usd, timings });
     return r;
   };
 
@@ -380,6 +397,7 @@ export async function runCommandBrainStream(
   if (!researchQuery && !trimmed.startsWith("/")) {
     emit({ type: "status", text: "routing…" });
     const c = await classifyIntent(trimmed);
+    classifyMs = Date.now() - started;
     intent = c.intent;
     haikuCost = computeCostUsd(env.classifyModel, c.usage);
     usage = sumUsage(usage, c.usage);
@@ -428,18 +446,19 @@ export async function runCommandBrainStream(
 
   const dynamicContext = await loadDynamicContext(ctx);
 
-  // CHAT LANE → one tool-less streamed call. Deltas flow to the HUD, which
+  // CHAT/BYE LANE → one tool-less streamed call. Deltas flow to the HUD, which
   // speaks them sentence-by-sentence for a conversational back-and-forth.
-  if (intent === "chat") {
+  if (intent === "chat" || intent === "bye") {
     const stream = client().messages.stream({
       model: env.commandModel,
-      max_tokens: 1024,
-      system: await buildSystemBlocks("chat", dynamicContext),
+      max_tokens: intent === "bye" ? 64 : 1024,
+      system: await buildSystemBlocks(intent, dynamicContext),
       messages: [{ role: "user", content: trimmed }],
     });
     let reply = "";
     for await (const ev of stream) {
       if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") {
+        if (firstDeltaMs === undefined) firstDeltaMs = Date.now() - started;
         reply += ev.delta.text;
         emit({ type: "delta", text: ev.delta.text });
       }
@@ -449,7 +468,7 @@ export async function runCommandBrainStream(
     const costUsd = haikuCost + computeCostUsd(env.commandModel, usage);
     await logSession(ctx, env.commandModel, usage, costUsd, (Date.now() - started) / 1000);
     afterTurn(ctx, trimmed, reply.trim());
-    return finish({ reply: reply.trim() || "…", actions: [], cost_usd: costUsd });
+    return finish({ reply: reply.trim() || "…", actions: [], cost_usd: costUsd }, true);
   }
 
   // ACT LANE → claude-sonnet-5 streamed tool-use loop.
@@ -470,6 +489,7 @@ export async function runCommandBrainStream(
     });
     for await (const ev of stream) {
       if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") {
+        if (firstDeltaMs === undefined) firstDeltaMs = Date.now() - started;
         emit({ type: "delta", text: ev.delta.text });
       }
     }
@@ -504,5 +524,5 @@ export async function runCommandBrainStream(
   await recordActLane(ctx, trimmed, actions, reply, costUsd);
   afterTurn(ctx, trimmed, reply);
 
-  return finish({ reply: reply || "done (no reply text)", actions, cost_usd: costUsd });
+  return finish({ reply: reply || "done (no reply text)", actions, cost_usd: costUsd }, true);
 }

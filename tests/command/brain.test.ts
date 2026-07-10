@@ -356,6 +356,12 @@ describe("classifyIntent", () => {
     expect(intent).toBe("research");
     expect(anthropicState.requests[0].max_tokens).toBe(8);
   });
+
+  it("recognizes a natural goodbye", async () => {
+    anthropicState.queue = [textResponse("bye", USAGE)];
+    const { intent } = await classifyIntent("thanks, that's all for tonight");
+    expect(intent).toBe("bye");
+  });
 });
 
 describe("POST /api/command", () => {
@@ -399,7 +405,34 @@ describe("runCommandBrainStream", () => {
     expect(events.some((e) => e.type === "status" && (e as { lane?: string }).lane === "chat")).toBe(true);
     expect(out.actions).toHaveLength(0);
     expect(out.reply).toContain("Doing great");
-    expect(events.at(-1)?.type).toBe("done");
+    const done = events.at(-1) as { type: string; timings?: { classify_ms?: number; first_delta_ms?: number; total_ms: number } };
+    expect(done.type).toBe("done");
+    // latency instrumentation rides the done event
+    expect(typeof done.timings?.total_ms).toBe("number");
+    expect(typeof done.timings?.classify_ms).toBe("number");
+    expect(typeof done.timings?.first_delta_ms).toBe("number");
+  });
+
+  it("BYE lane: short in-character sign-off, no tools, and the OS doesn't take the last word", async () => {
+    dbHolder.db = createMockDb(baseTables());
+    anthropicState.queue = [
+      textResponse("bye", USAGE), // classify
+      textResponse("Goodnight, Doctor."), // sign-off (via stream)
+    ];
+    const events: StreamEvent[] = [];
+    const out = await runCommandBrainStream(
+      "thanks, that's all for tonight",
+      { db: asDb(dbHolder.db), via: "voice" },
+      (e) => events.push(e),
+    );
+
+    expect(events.some((e) => e.type === "status" && (e as { lane?: string }).lane === "bye")).toBe(true);
+    const byeReq = anthropicState.requests[1];
+    expect(byeReq.tools).toBeUndefined(); // tool-less — it cannot start new work
+    expect(byeReq.max_tokens).toBe(64); // structurally incapable of a monologue
+    expect(JSON.stringify(byeReq.system)).toContain("SIGN-OFF");
+    expect(out.reply).toBe("Goodnight, Doctor.");
+    expect(out.actions).toHaveLength(0);
   });
 
   it("ACT lane: streams a tool action then the final reply", async () => {
