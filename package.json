@@ -11,6 +11,7 @@
     "watcher": "tsx src/watcher/index.ts",
     "seed": "tsx scripts/seed.ts",
     "voice:check": "tsx scripts/voice-check.ts",
+    "hermes:check": "tsx scripts/hermes-check.ts",
     "import:mcv2": "tsx scripts/import-mcv2.ts",
     "telegram:set-webhook": "tsx scripts/set-telegram-webhook.ts",
     "test": "vitest run",
