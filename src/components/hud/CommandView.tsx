@@ -58,6 +58,32 @@ export default function CommandView(ctx: ViewCtx) {
   const interimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // end-of-turn window
   const latencyRef = useRef<{ osId: number; t0: number; firstDelta: number; firstAudioDone: boolean } | null>(null);
   const resumeRef = useRef<() => void>(() => {}); // conversation-mode re-listen hook
+  const browserVoiceRef = useRef<SpeechSynthesisVoice | null>(null); // best fallback voice available
+
+  // Pick the best browser voice for the fallback path. Edge ships free NEURAL
+  // British voices ("... Online (Natural) - English (United Kingdom)") that
+  // sound worlds better than the robotic default the browser hands out.
+  useEffect(() => {
+    const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
+    if (!synth) return;
+    const score = (v: SpeechSynthesisVoice) => {
+      const n = v.name.toLowerCase();
+      let s = 0;
+      if (/natural|neural|online/.test(n)) s += 8; // Edge neural tier
+      if (/en[-_]gb/i.test(v.lang)) s += 4; // British
+      if (/\b(ryan|thomas|guy|george|daniel|alfie|oliver)\b/.test(n)) s += 2; // male-leaning
+      return s;
+    };
+    const resolve = () => {
+      const voices = synth.getVoices().filter((v) => /^en/i.test(v.lang));
+      browserVoiceRef.current = voices.length
+        ? [...voices].sort((a, b) => score(b) - score(a))[0]
+        : null;
+    };
+    resolve();
+    synth.addEventListener?.("voiceschanged", resolve);
+    return () => synth.removeEventListener?.("voiceschanged", resolve);
+  }, []);
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -99,8 +125,12 @@ export default function CommandView(ctx: ViewCtx) {
         return;
       }
       const u = new SpeechSynthesisUtterance(clean);
-      u.rate = 0.98; // measured, unhurried
-      u.pitch = 0.8; // deeper — closer to a butler than the default voice
+      const v = browserVoiceRef.current;
+      if (v) u.voice = v;
+      // Neural voices sound best untouched; only nudge the legacy robots.
+      const neural = v ? /natural|neural|online/i.test(v.name) : false;
+      u.rate = neural ? 1.04 : 1.0;
+      u.pitch = neural ? 1 : 0.9;
       u.onend = finishUtterance;
       u.onerror = finishUtterance;
       window.speechSynthesis.speak(u);
@@ -108,13 +138,16 @@ export default function CommandView(ctx: ViewCtx) {
     [finishUtterance],
   );
 
-  // Latency mark: when the first audio of a reply actually starts playing.
-  const markFirstAudio = useCallback(() => {
+  // Latency mark: when the first audio of a reply actually starts playing —
+  // labelled with the engine that spoke, so "is it really onyx?" has an answer.
+  const markFirstAudio = useCallback((engine?: string) => {
     const lat = latencyRef.current;
     if (!lat || lat.firstAudioDone) return;
     lat.firstAudioDone = true;
     const s = ((performance.now() - lat.t0) / 1000).toFixed(1);
-    setChat((c) => c.map((m) => (m.id === lat.osId ? { ...m, voiceMeta: `voice ${s}s` } : m)));
+    setChat((c) =>
+      c.map((m) => (m.id === lat.osId ? { ...m, voiceMeta: `voice ${s}s${engine ? ` · ${engine}` : ""}` } : m)),
+    );
   }, []);
 
   // Progressive playback: append MP3 chunks into a MediaSource buffer as they
@@ -237,7 +270,7 @@ export default function CommandView(ctx: ViewCtx) {
           return;
         }
         if (res && res.ok) {
-          markFirstAudio();
+          markFirstAudio(res.headers.get("x-tts-model") ?? undefined);
           await playStreamingAudio(res);
           finishUtterance();
           return;
@@ -256,11 +289,12 @@ export default function CommandView(ctx: ViewCtx) {
               /* body wasn't JSON */
             }
           }
+          const fallbackName = browserVoiceRef.current?.name ?? "system default voice";
           setChat((c) => [
             ...c,
             {
               who: "os",
-              text: `⚠ Jarvis voice offline (${reason}). Falling back to the robotic browser voice. Fix: check OPENAI_API_KEY in .env, restart npm run dev, then toggle 🔊 VOICE off and on to retry.`,
+              text: `⚠ Jarvis voice offline (${reason}). Falling back to the browser voice: ${fallbackName}. Fix: run npm run voice:check in PowerShell, or set ELEVENLABS_API_KEY / OPENAI_API_KEY in .env, restart npm run dev, then toggle 🔊 VOICE off and on to retry.`,
               id: idRef.current++,
             },
           ]);

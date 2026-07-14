@@ -70,7 +70,17 @@ export const env = {
   get openaiApiKey() {
     return process.env.OPENAI_API_KEY ?? "";
   },
-  // Text-to-speech (the HUD "Jarvis" voice). Uses the OpenAI key above.
+  // Text-to-speech (the HUD "Jarvis" voice). ElevenLabs (British, film-grade)
+  // takes priority when its key is set; otherwise OpenAI onyx via the key above.
+  get elevenLabsApiKey() {
+    return process.env.ELEVENLABS_API_KEY ?? "";
+  },
+  get elevenLabsVoiceId() {
+    return process.env.ELEVENLABS_VOICE_ID ?? "onwK4e9ZLuTAKqWW03F9"; // "Daniel" — deep, authoritative British
+  },
+  get elevenLabsModel() {
+    return process.env.ELEVENLABS_MODEL ?? "eleven_turbo_v2_5"; // low-latency conversational tier
+  },
   get ttsModel() {
     return process.env.TTS_MODEL ?? "gpt-4o-mini-tts";
   },
