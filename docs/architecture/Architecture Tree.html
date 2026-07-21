@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>BRIGHT OS — graphify tree viewer</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #f9f9f9;
+      color: #333;
+    }
+    h1 {
+      margin: 20px 0 0 24px;
+      font-size: 2.2rem;
+      font-weight: bold;
+      color: #1e3a56;
+    }
+    .controls {
+      margin: 20px 0 15px 24px;
+    }
+    button {
+      margin-right: 10px;
+      padding: 8px 18px;
+      background: #007bff;
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: background 0.2s ease-in-out;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    button:hover {
+      background: #0056b3;
+    }
+    button:active {
+      background: #004085;
+    }
+    #tree-container {
+      width: calc(100vw - 48px); /* Adjust for body margin/padding */
+      height: 85vh;
+      overflow: auto;
+      border-radius: 8px;
+      background: #fff;
+      margin-left: 24px;
+      margin-right: 24px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+      border: 1px solid #ddd;
+    }
+    svg {
+      background: #fff;
+      border-radius: 8px;
+      display: block; /* Important for D3 */
+    }
+    .node circle {
+      stroke-width: 2.5px;
+    }
+    .node text { /* Base style for the <text> container */
+      font: 13px 'Segoe UI', sans-serif;
+      paint-order: stroke fill; /* Ensures text is readable over lines */
+      stroke: #fff; /* White halo */
+      stroke-width: 3px; /* Halo thickness */
+      stroke-linejoin: round;
+      stroke-opacity: 0.85; /* Halo opacity */
+    }
+    .link {
+      fill: none;
+      stroke-opacity: 0.7;
+      stroke-width: 2px;
+    }
+  </style>
+</head>
+<body>
+  <h1>BRIGHT OS — Knowledge Graph</h1>
+  <div class="controls">
+    <button onclick="expandAll()">Expand All</button>
+    <button onclick="collapseAll()">Collapse All</button>
+    <button onclick="resetView()">Reset View</button>
+  </div>
+  <div id="tree-container">
+    <svg id="tree-svg" width="6000" height="8000"></svg>
+  </div>
+
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script>
+    const initialJsonData = {"name":"BRIGHT OS","total_count":626,"children":[{"name":"brain","total_count":17,"children":[{"name":"KNOWLEDGE.md","total_count":6,"children":[{"name":"Brands (11)","total_count":1,"children":[]},{"name":"BRIGHT OS \u2014 CORE KNOWLEDGE","total_count":1,"children":[]},{"name":"Doctrine","total_count":1,"children":[]},{"name":"KNOWLEDGE.md","total_count":1,"children":[]},{"name":"Stack (what is wired in)","total_count":1,"children":[]},{"name":"The operator","total_count":1,"children":[]}]},{"name":"PERSONALITY.md","total_count":5,"children":[{"name":"BRIGHT OS \u2014 PERSONALITY","total_count":1,"children":[]},{"name":"Cadence","total_count":1,"children":[]},{"name":"Character","total_count":1,"children":[]},{"name":"Mood calibration","total_count":1,"children":[]},{"name":"PERSONALITY.md","total_count":1,"children":[]}]},{"name":"SELF.md","total_count":6,"children":[{"name":"BRIGHT OS \u2014 SELF-KNOWLEDGE","total_count":1,"children":[]},{"name":"My body","total_count":1,"children":[]},{"name":"My limits (honesty rules)","total_count":1,"children":[]},{"name":"My memory","total_count":1,"children":[]},{"name":"SELF.md","total_count":1,"children":[]},{"name":"What I am","total_count":1,"children":[]}]}]},{"name":"docs","total_count":34,"children":[{"name":"HERMES-SETUP.md","total_count":7,"children":[{"name":"1. Install Hermes (on your PC, or a small VPS)","total_count":1,"children":[]},{"name":"2. Connect your model keys (OpenAI + Claude)","total_count":1,"children":[]},{"name":"3. Enable Hermes' API server (what BRIGHT OS talks to)","total_count":1,"children":[]},{"name":"4. Point BRIGHT OS at it","total_count":1,"children":[]},{"name":"5. Verify the handshake","total_count":1,"children":[]},{"name":"Bringing HERMES online","total_count":1,"children":[]},{"name":"HERMES-SETUP.md","total_count":1,"children":[]}]},{"name":"HERMES.md","total_count":7,"children":[{"name":"BRIGHT OS env","total_count":1,"children":[]},{"name":"Docker (same VPS, used by our docker-compose.yml)","total_count":1,"children":[]},{"name":"Enabling the API server on your Hermes instance","total_count":1,"children":[]},{"name":"HERMES \u2014 memory + research lane (self-hosted hermes-agent)","total_count":1,"children":[]},{"name":"HERMES.md","total_count":1,"children":[]},{"name":"How the bridge works (src/lib/hermes.ts)","total_count":1,"children":[]},{"name":"Optional: push-on-finish hook","total_count":1,"children":[]}]},{"name":"OPENCLAW_SKILL.md","total_count":10,"children":[{"name":"1 \u00b7 Pull your queue (poll every few minutes)","total_count":1,"children":[]},{"name":"2 \u00b7 Report status changes","total_count":1,"children":[]},{"name":"3 \u00b7 File a claim for every assertion you make","total_count":1,"children":[]},{"name":"4 \u00b7 Request approval before publishing","total_count":1,"children":[]},{"name":"5 \u00b7 Publish confirmations + events \u2192 heartbeat","total_count":1,"children":[]},{"name":"Environment","total_count":1,"children":[]},{"name":"House rules (enforced server-side, listed here so you stop early)","total_count":1,"children":[]},{"name":"Node HMAC snippet","total_count":1,"children":[]},{"name":"OPENCLAW_SKILL.md","total_count":1,"children":[]},{"name":"SKILL.md \u2014 BRIGHT OS bridge (install in your OpenCLAW instance)","total_count":1,"children":[]}]},{"name":"SMOKE_TEST.md","total_count":10,"children":[{"name":"0 \u00b7 Sign in (30s)","total_count":1,"children":[]},{"name":"1 \u00b7 Create a task (chat \u2192 board)","total_count":1,"children":[]},{"name":"2 \u00b7 Agent works it (simulating the OpenClaw skill)","total_count":1,"children":[]},{"name":"3 \u00b7 Decision appears in Telegram","total_count":1,"children":[]},{"name":"4 \u00b7 Approve (the 10-second moment)","total_count":1,"children":[]},{"name":"5 \u00b7 Heartbeat verifies the publish","total_count":1,"children":[]},{"name":"6 \u00b7 Board note updates in Obsidian","total_count":1,"children":[]},{"name":"7 \u00b7 Round out the cockpit","total_count":1,"children":[]},{"name":"SMOKE TEST \u2014 the full loop from your phone","total_count":1,"children":[]},{"name":"SMOKE_TEST.md","total_count":1,"children":[]}]}]},{"name":"HEARTBEAT.md","total_count":5,"children":[{"name":"Checks","total_count":1,"children":[]},{"name":"HEARTBEAT.md","total_count":1,"children":[]},{"name":"HEARTBEAT.md \u2014 30-minute system pulse (keep under 50 lines)","total_count":1,"children":[]},{"name":"Rules","total_count":1,"children":[]},{"name":"Tuning","total_count":1,"children":[]}]},{"name":"next.config.ts","total_count":1,"children":[{"name":"nextConfig","total_count":1,"children":[]}]},{"name":"package.json","total_count":60,"children":[{"name":"@anthropic-ai/sdk","total_count":1,"children":[]},{"name":"@anthropic-ai/sdk","total_count":1,"children":[]},{"name":"@supabase/ssr","total_count":1,"children":[]},{"name":"@supabase/ssr","total_count":1,"children":[]},{"name":"@supabase/supabase-js","total_count":1,"children":[]},{"name":"@supabase/supabase-js","total_count":1,"children":[]},{"name":"@tailwindcss/postcss","total_count":1,"children":[]},{"name":"@tailwindcss/postcss","total_count":1,"children":[]},{"name":"@types/node","total_count":1,"children":[]},{"name":"@types/node","total_count":1,"children":[]},{"name":"@types/react","total_count":1,"children":[]},{"name":"@types/react","total_count":1,"children":[]},{"name":"@types/react-dom","total_count":1,"children":[]},{"name":"@types/react-dom","total_count":1,"children":[]},{"name":"build","total_count":1,"children":[]},{"name":"chokidar","total_count":1,"children":[]},{"name":"chokidar","total_count":1,"children":[]},{"name":"dependencies","total_count":1,"children":[]},{"name":"description","total_count":1,"children":[]},{"name":"dev","total_count":1,"children":[]},{"name":"devDependencies","total_count":1,"children":[]},{"name":"dotenv","total_count":1,"children":[]},{"name":"dotenv","total_count":1,"children":[]},{"name":"grammy","total_count":1,"children":[]},{"name":"grammy","total_count":1,"children":[]},{"name":"gray-matter","total_count":1,"children":[]},{"name":"gray-matter","total_count":1,"children":[]},{"name":"hermes:check","total_count":1,"children":[]},{"name":"import:mcv2","total_count":1,"children":[]},{"name":"name","total_count":1,"children":[]},{"name":"next","total_count":1,"children":[]},{"name":"next","total_count":1,"children":[]},{"name":"node-cron","total_count":1,"children":[]},{"name":"node-cron","total_count":1,"children":[]},{"name":"private","total_count":1,"children":[]},{"name":"react","total_count":1,"children":[]},{"name":"react","total_count":1,"children":[]},{"name":"react-dom","total_count":1,"children":[]},{"name":"react-dom","total_count":1,"children":[]},{"name":"scripts","total_count":1,"children":[]},{"name":"seed","total_count":1,"children":[]},{"name":"start","total_count":1,"children":[]},{"name":"tailwindcss","total_count":1,"children":[]},{"name":"tailwindcss","total_count":1,"children":[]},{"name":"telegram:set-webhook","total_count":1,"children":[]},{"name":"test","total_count":1,"children":[]},{"name":"test:watch","total_count":1,"children":[]},{"name":"tsx","total_count":1,"children":[]},{"name":"tsx","total_count":1,"children":[]},{"name":"typecheck","total_count":1,"children":[]},{"name":"typescript","total_count":1,"children":[]},{"name":"typescript","total_count":1,"children":[]},{"name":"version","total_count":1,"children":[]},{"name":"vitest","total_count":1,"children":[]},{"name":"vitest","total_count":1,"children":[]},{"name":"voice:check","total_count":1,"children":[]},{"name":"watcher","total_count":1,"children":[]},{"name":"workers","total_count":1,"children":[]},{"name":"zod","total_count":1,"children":[]},{"name":"zod","total_count":1,"children":[]}]},{"name":"postcss.config.mjs","total_count":1,"children":[{"name":"config","total_count":1,"children":[]}]},{"name":"README.md","total_count":11,"children":[{"name":"1 \u00b7 Supabase (already provisioned)","total_count":1,"children":[]},{"name":"2 \u00b7 Local dev","total_count":1,"children":[]},{"name":"3 \u00b7 VPS deploy (DigitalOcean, Docker Compose)","total_count":1,"children":[]},{"name":"4 \u00b7 Schedules (America/Los_Angeles)","total_count":1,"children":[]},{"name":"5 \u00b7 Smoke test","total_count":1,"children":[]},{"name":"API surface (all human-or-agent authenticated; see docs/OPENCLAW_SKILL.md)","total_count":1,"children":[]},{"name":"BRIGHT OS","total_count":1,"children":[]},{"name":"Non-negotiable guardrails (enforced in code + DB triggers)","total_count":1,"children":[]},{"name":"Post-deploy wiring","total_count":1,"children":[]},{"name":"README.md","total_count":1,"children":[]},{"name":"The loop it runs","total_count":1,"children":[]}]},{"name":"scripts","total_count":21,"children":[{"name":"hermes-check.ts","total_count":5,"children":[{"name":"connCode()","total_count":1,"children":[]},{"name":"extractText()","total_count":1,"children":[]},{"name":"fail()","total_count":1,"children":[]},{"name":"main()","total_count":1,"children":[]},{"name":"url","total_count":1,"children":[]}]},{"name":"import-mcv2.ts","total_count":6,"children":[{"name":"fetchAll()","total_count":1,"children":[]},{"name":"main()","total_count":1,"children":[]},{"name":"NAMESPACE","total_count":1,"children":[]},{"name":"need()","total_count":1,"children":[]},{"name":"STATUS_MAP","total_count":1,"children":[]},{"name":"uuidv5FromLegacy()","total_count":1,"children":[]}]},{"name":"seed.ts","total_count":5,"children":[{"name":"AGENTS","total_count":1,"children":[]},{"name":"BRANDS","total_count":1,"children":[]},{"name":"db","total_count":1,"children":[]},{"name":"main()","total_count":1,"children":[]},{"name":"seedDemo()","total_count":1,"children":[]}]},{"name":"set-telegram-webhook.ts","total_count":1,"children":[{"name":"main()","total_count":1,"children":[]}]},{"name":"voice-check.ts","total_count":4,"children":[{"name":"fail()","total_count":1,"children":[]},{"name":"main()","total_count":1,"children":[]},{"name":"render()","total_count":1,"children":[]},{"name":"renderEleven()","total_count":1,"children":[]}]}]},{"name":"src","total_count":346,"children":[{"name":"app","total_count":71,"children":[{"name":"api","total_count":61,"children":[{"name":"agents","total_count":9,"children":[{"name":"[id]","total_count":6,"children":[{"name":"route.ts","total_count":6,"children":[{"name":"agentPatch","total_count":1,"children":[]},{"name":"Ctx","total_count":1,"children":[]},{"name":"DELETE()","total_count":1,"children":[]},{"name":"GET()","total_count":1,"children":[]},{"name":"humanPatch","total_count":1,"children":[]},{"name":"PATCH()","total_count":1,"children":[]}]}]},{"name":"route.ts","total_count":3,"children":[{"name":"createSchema","total_count":1,"children":[]},{"name":"GET()","total_count":1,"children":[]},{"name":"POST()","total_count":1,"children":[]}]}]},{"name":"auth","total_count":6,"children":[{"name":"dev-login","total_count":1,"children":[{"name":"route.ts","total_count":1,"children":[{"name":"POST()","total_count":1,"children":[]}]}]},{"name":"login","total_count":2,"children":[{"name":"route.ts","total_count":2,"children":[{"name":"POST()","total_count":1,"children":[]},{"name":"schema","total_count":1,"children":[]}]}]},{"name":"logout","total_count":1,"children":[{"name":"route.ts","total_count":1,"children":[{"name":"POST()","total_count":1,"children":[]}]}]},{"name":"verify","total_count":2,"children":[{"name":"route.ts","total_count":2,"children":[{"name":"POST()","total_count":1,"children":[]},{"name":"schema","total_count":1,"children":[]}]}]}]},{"name":"brands","total_count":5,"children":[{"name":"route.ts","total_count":5,"children":[{"name":"createSchema","total_count":1,"children":[]},{"name":"GET()","total_count":1,"children":[]},{"name":"PATCH()","total_count":1,"children":[]},{"name":"patchSchema","total_count":1,"children":[]},{"name":"POST()","total_count":1,"children":[]}]}]},{"name":"claims","total_count":3,"children":[{"name":"[id]","total_count":3,"children":[{"name":"route.ts","total_count":3,"children":[{"name":"Ctx","total_count":1,"children":[]},{"name":"PATCH()","total_count":1,"children":[]},{"name":"patchSchema","total_count":1,"children":[]}]}]}]},{"name":"command","total_count":4,"children":[{"name":"route.ts","total_count":2,"children":[{"name":"POST()","total_count":1,"children":[]},{"name":"schema","total_count":1,"children":[]}]},{"name":"stream","total_count":2,"children":[{"name":"route.ts","total_count":2,"children":[{"name":"POST()","total_count":1,"children":[]},{"name":"schema","total_count":1,"children":[]}]}]}]},{"name":"decisions","total_count":6,"children":[{"name":"[id]","total_count":3,"children":[{"name":"decide","total_count":3,"children":[{"name":"route.ts","total_count":3,"children":[{"name":"Ctx","total_count":1,"children":[]},{"name":"POST()","total_count":1,"children":[]},{"name":"schema","total_count":1,"children":[]}]}]}]},{"name":"route.ts","total_count":3,"children":[{"name":"createSchema","total_count":1,"children":[]},{"name":"GET()","total_count":1,"children":[]},{"name":"POST()","total_count":1,"children":[]}]}]},{"name":"heartbeat","total_count":4,"children":[{"name":"route.ts","total_count":4,"children":[{"name":"bodySchema","total_count":1,"children":[]},{"name":"eventSchema","total_count":1,"children":[]},{"name":"GET()","total_count":1,"children":[]},{"name":"POST()","total_count":1,"children":[]}]}]},{"name":"memory","total_count":5,"children":[{"name":"promote","total_count":2,"children":[{"name":"route.ts","total_count":2,"children":[{"name":"POST()","total_count":1,"children":[]},{"name":"schema","total_count":1,"children":[]}]}]},{"name":"route.ts","total_count":3,"children":[{"name":"GET()","total_count":1,"children":[]},{"name":"POST()","total_count":1,"children":[]},{"name":"upsertSchema","total_count":1,"children":[]}]}]},{"name":"metrics","total_count":1,"children":[{"name":"summary","total_count":1,"children":[{"name":"route.ts","total_count":1,"children":[{"name":"GET()","total_count":1,"children":[]}]}]}]},{"name":"tasks","total_count":13,"children":[{"name":"[id]","total_count":9,"children":[{"name":"claims","total_count":4,"children":[{"name":"route.ts","total_count":4,"children":[{"name":"createSchema","total_count":1,"children":[]},{"name":"Ctx","total_count":1,"children":[]},{"name":"GET()","total_count":1,"children":[]},{"name":"POST()","total_count":1,"children":[]}]}]},{"name":"route.ts","total_count":5,"children":[{"name":"Ctx","total_count":1,"children":[]},{"name":"DELETE()","total_count":1,"children":[]},{"name":"GET()","total_count":1,"children":[]},{"name":"PATCH()","total_count":1,"children":[]},{"name":"patchSchema","total_count":1,"children":[]}]}]},{"name":"route.ts","total_count":4,"children":[{"name":"createSchema","total_count":1,"children":[]},{"name":"GET()","total_count":1,"children":[]},{"name":"POST()","total_count":1,"children":[]},{"name":"resolveAgentIds()","total_count":1,"children":[]}]}]},{"name":"telegram","total_count":1,"children":[{"name":"webhook","total_count":1,"children":[{"name":"route.ts","total_count":1,"children":[{"name":"POST()","total_count":1,"children":[]}]}]}]},{"name":"tts","total_count":4,"children":[{"name":"route.ts","total_count":4,"children":[{"name":"POST()","total_count":1,"children":[]},{"name":"renderElevenLabs()","total_count":1,"children":[]},{"name":"renderOpenAI()","total_count":1,"children":[]},{"name":"schema","total_count":1,"children":[]}]}]}]},{"name":"layout.tsx","total_count":7,"children":[{"name":"inter","total_count":1,"children":[]},{"name":"jbmono","total_count":1,"children":[]},{"name":"metadata","total_count":1,"children":[]},{"name":"orbitron","total_count":1,"children":[]},{"name":"rajdhani","total_count":1,"children":[]},{"name":"RootLayout()","total_count":1,"children":[]},{"name":"viewport","total_count":1,"children":[]}]},{"name":"login","total_count":2,"children":[{"name":"page.tsx","total_count":2,"children":[{"name":"F","total_count":1,"children":[]},{"name":"Login()","total_count":1,"children":[]}]}]},{"name":"page.tsx","total_count":1,"children":[{"name":"Home()","total_count":1,"children":[]}]}]},{"name":"components","total_count":64,"children":[{"name":"hud","total_count":64,"children":[{"name":"AgentDrawer.tsx","total_count":1,"children":[{"name":"AgentDrawer()","total_count":1,"children":[]}]},{"name":"AnalyticsView.tsx","total_count":1,"children":[{"name":"AnalyticsView()","total_count":1,"children":[]}]},{"name":"BoardView.tsx","total_count":2,"children":[{"name":"BoardView()","total_count":1,"children":[]},{"name":"COLS","total_count":1,"children":[]}]},{"name":"BrandsView.tsx","total_count":1,"children":[{"name":"BrandsView()","total_count":1,"children":[]}]},{"name":"BrightOS.tsx","total_count":5,"children":[{"name":"BrightOS()","total_count":1,"children":[]},{"name":"Shell()","total_count":1,"children":[]},{"name":"Tab","total_count":1,"children":[]},{"name":"TABS","total_count":1,"children":[]},{"name":"ViewCtx","total_count":1,"children":[]}]},{"name":"chrome.tsx","total_count":6,"children":[{"name":"Boot()","total_count":1,"children":[]},{"name":"DiffLines()","total_count":1,"children":[]},{"name":"HexAvatar()","total_count":1,"children":[]},{"name":"Particles()","total_count":1,"children":[]},{"name":"SectionLabel()","total_count":1,"children":[]},{"name":"Stamp()","total_count":1,"children":[]}]},{"name":"CommandView.tsx","total_count":6,"children":[{"name":"ChatMsg","total_count":1,"children":[]},{"name":"CommandView()","total_count":1,"children":[]},{"name":"Orb","total_count":1,"children":[]},{"name":"PHASES","total_count":1,"children":[]},{"name":"SpeechRecognitionLike","total_count":1,"children":[]},{"name":"stripForSpeech()","total_count":1,"children":[]}]},{"name":"data.tsx","total_count":10,"children":[{"name":"CommandReply","total_count":1,"children":[]},{"name":"DecisionJoined","total_count":1,"children":[]},{"name":"getJson()","total_count":1,"children":[]},{"name":"HudContext","total_count":1,"children":[]},{"name":"HudDataProvider()","total_count":1,"children":[]},{"name":"HudState","total_count":1,"children":[]},{"name":"MemoryData","total_count":1,"children":[]},{"name":"StreamHandlers","total_count":1,"children":[]},{"name":"TaskWithRels","total_count":1,"children":[]},{"name":"useHud()","total_count":1,"children":[]}]},{"name":"derive.ts","total_count":13,"children":[{"name":"AGENT_SKILLS","total_count":1,"children":[]},{"name":"DecisionVM","total_count":1,"children":[]},{"name":"deriveDecisions()","total_count":1,"children":[]},{"name":"deriveEngines()","total_count":1,"children":[]},{"name":"deriveFleet()","total_count":1,"children":[]},{"name":"derivePods()","total_count":1,"children":[]},{"name":"EngineVM","total_count":1,"children":[]},{"name":"eventColor()","total_count":1,"children":[]},{"name":"FleetAgent","total_count":1,"children":[]},{"name":"logStreak()","total_count":1,"children":[]},{"name":"nameSeed()","total_count":1,"children":[]},{"name":"PodVM","total_count":1,"children":[]},{"name":"tickerText()","total_count":1,"children":[]}]},{"name":"MemoryView.tsx","total_count":1,"children":[{"name":"MemoryView()","total_count":1,"children":[]}]},{"name":"MobileView.tsx","total_count":1,"children":[{"name":"MobileView()","total_count":1,"children":[]}]},{"name":"NeuralCanvas.tsx","total_count":7,"children":[{"name":"buildClusters()","total_count":1,"children":[]},{"name":"ClusterDef","total_count":1,"children":[]},{"name":"LAYOUT","total_count":1,"children":[]},{"name":"NeuralCanvas()","total_count":1,"children":[]},{"name":"Node","total_count":1,"children":[]},{"name":"NV","total_count":1,"children":[]},{"name":"Pulse","total_count":1,"children":[]}]},{"name":"theme.ts","total_count":10,"children":[{"name":"ageColor()","total_count":1,"children":[]},{"name":"AGENT_STATUS","total_count":1,"children":[]},{"name":"agentGlyph()","total_count":1,"children":[]},{"name":"C","total_count":1,"children":[]},{"name":"chime()","total_count":1,"children":[]},{"name":"CLUSTER_COLORS","total_count":1,"children":[]},{"name":"F","total_count":1,"children":[]},{"name":"heatCells()","total_count":1,"children":[]},{"name":"isoWeekLabel()","total_count":1,"children":[]},{"name":"StatusStyle","total_count":1,"children":[]}]}]}]},{"name":"lib","total_count":146,"children":[{"name":"auth.ts","total_count":5,"children":[{"name":"Actor","total_count":1,"children":[]},{"name":"getActor()","total_count":1,"children":[]},{"name":"getAgentActor()","total_count":1,"children":[]},{"name":"getHumanActor()","total_count":1,"children":[]},{"name":"timingSafeEq()","total_count":1,"children":[]}]},{"name":"claude","total_count":7,"children":[{"name":"client.ts","total_count":3,"children":[{"name":"__resetAnthropicClient()","total_count":1,"children":[]},{"name":"client()","total_count":1,"children":[]},{"name":"logOsSession()","total_count":1,"children":[]}]},{"name":"pricing.ts","total_count":4,"children":[{"name":"computeCostUsd()","total_count":1,"children":[]},{"name":"PER_MTOK","total_count":1,"children":[]},{"name":"sumUsage()","total_count":1,"children":[]},{"name":"UsageLike","total_count":1,"children":[]}]}]},{"name":"command","total_count":51,"children":[{"name":"brain-files.ts","total_count":8,"children":[{"name":"__resetBrainFileCache()","total_count":1,"children":[]},{"name":"BRAIN_FILES","total_count":1,"children":[]},{"name":"BrainFile","total_count":1,"children":[]},{"name":"cache","total_count":1,"children":[]},{"name":"CacheEntry","total_count":1,"children":[]},{"name":"loadBrainFile()","total_count":1,"children":[]},{"name":"repoPath()","total_count":1,"children":[]},{"name":"resolveBrainPath()","total_count":1,"children":[]}]},{"name":"brain-memory.ts","total_count":11,"children":[{"name":"clampImportance()","total_count":1,"children":[]},{"name":"extractMemories()","total_count":1,"children":[]},{"name":"MEMORY_KINDS","total_count":1,"children":[]},{"name":"MemoryKind","total_count":1,"children":[]},{"name":"MemoryRow","total_count":1,"children":[]},{"name":"normalizeKind()","total_count":1,"children":[]},{"name":"recallMemories()","total_count":1,"children":[]},{"name":"rememberMemory()","total_count":1,"children":[]},{"name":"RememberResult","total_count":1,"children":[]},{"name":"renderMemoryDigest()","total_count":1,"children":[]},{"name":"topMemories()","total_count":1,"children":[]}]},{"name":"brain.ts","total_count":12,"children":[{"name":"__drainBrainTasks()","total_count":1,"children":[]},{"name":"afterTurn()","total_count":1,"children":[]},{"name":"buildSystemBlocks()","total_count":1,"children":[]},{"name":"classifyIntent()","total_count":1,"children":[]},{"name":"Intent","total_count":1,"children":[]},{"name":"laneStatus()","total_count":1,"children":[]},{"name":"loadDynamicContext()","total_count":1,"children":[]},{"name":"logSession()","total_count":1,"children":[]},{"name":"pendingBrainTasks","total_count":1,"children":[]},{"name":"recordActLane()","total_count":1,"children":[]},{"name":"runCommandBrain()","total_count":1,"children":[]},{"name":"runCommandBrainStream()","total_count":1,"children":[]}]},{"name":"router.ts","total_count":7,"children":[{"name":"CommandContext","total_count":1,"children":[]},{"name":"CommandEmit","total_count":1,"children":[]},{"name":"CommandResult","total_count":1,"children":[]},{"name":"CommandTimings","total_count":1,"children":[]},{"name":"runCommand()","total_count":1,"children":[]},{"name":"runCommandStream()","total_count":1,"children":[]},{"name":"StreamEvent","total_count":1,"children":[]}]},{"name":"tools.ts","total_count":9,"children":[{"name":"assignAgent()","total_count":1,"children":[]},{"name":"COMMAND_TOOLS","total_count":1,"children":[]},{"name":"createTask()","total_count":1,"children":[]},{"name":"decide()","total_count":1,"children":[]},{"name":"executeCommandTool()","total_count":1,"children":[]},{"name":"resolveAgentId()","total_count":1,"children":[]},{"name":"searchMemory()","total_count":1,"children":[]},{"name":"ToolContext","total_count":1,"children":[]},{"name":"ToolInput","total_count":1,"children":[]}]},{"name":"working-memory.ts","total_count":4,"children":[{"name":"loadWorkingMemory()","total_count":1,"children":[]},{"name":"renderWorkingMemory()","total_count":1,"children":[]},{"name":"updateWorkingMemory()","total_count":1,"children":[]},{"name":"WorkingMemory","total_count":1,"children":[]}]}]},{"name":"decisions.ts","total_count":5,"children":[{"name":"DecideAction","total_count":1,"children":[]},{"name":"decideDecision()","total_count":1,"children":[]},{"name":"DecideResult","total_count":1,"children":[]},{"name":"listPendingWithAge()","total_count":1,"children":[]},{"name":"normalizeAction()","total_count":1,"children":[]}]},{"name":"embeddings.ts","total_count":1,"children":[{"name":"embedText()","total_count":1,"children":[]}]},{"name":"env.ts","total_count":2,"children":[{"name":"env","total_count":1,"children":[]},{"name":"required()","total_count":1,"children":[]}]},{"name":"ghl.ts","total_count":2,"children":[{"name":"getContactCount()","total_count":1,"children":[]},{"name":"ghlConfigured()","total_count":1,"children":[]}]},{"name":"gsc.ts","total_count":9,"children":[{"name":"b64url()","total_count":1,"children":[]},{"name":"computeDeltas()","total_count":1,"children":[]},{"name":"getAccessToken()","total_count":1,"children":[]},{"name":"gscConfigured()","total_count":1,"children":[]},{"name":"GscDelta","total_count":1,"children":[]},{"name":"parseTracked()","total_count":1,"children":[]},{"name":"queryDaily()","total_count":1,"children":[]},{"name":"QueryDayRow","total_count":1,"children":[]},{"name":"TrackedSite","total_count":1,"children":[]}]},{"name":"guardrails.ts","total_count":7,"children":[{"name":"alertCostBreakerOnce()","total_count":1,"children":[]},{"name":"autoTagDecision()","total_count":1,"children":[]},{"name":"checkCostBreaker()","total_count":1,"children":[]},{"name":"CostBreakerState","total_count":1,"children":[]},{"name":"isMedicalOrRegulatory()","total_count":1,"children":[]},{"name":"MEDICAL_PATTERNS","total_count":1,"children":[]},{"name":"startOfTodayIso()","total_count":1,"children":[]}]},{"name":"hermes.ts","total_count":9,"children":[{"name":"extractResponseText()","total_count":1,"children":[]},{"name":"hermesConfigured()","total_count":1,"children":[]},{"name":"HermesResearch","total_count":1,"children":[]},{"name":"hermesResponses()","total_count":1,"children":[]},{"name":"parseResearchJson()","total_count":1,"children":[]},{"name":"postSessionSummary()","total_count":1,"children":[]},{"name":"research()","total_count":1,"children":[]},{"name":"ResponsesReply","total_count":1,"children":[]},{"name":"storeResearchAsTask()","total_count":1,"children":[]}]},{"name":"hmac.ts","total_count":2,"children":[{"name":"signHeartbeat()","total_count":1,"children":[]},{"name":"verifyHeartbeatSignature()","total_count":1,"children":[]}]},{"name":"http.ts","total_count":3,"children":[{"name":"apiError()","total_count":1,"children":[]},{"name":"json()","total_count":1,"children":[]},{"name":"readJson()","total_count":1,"children":[]}]},{"name":"memory.ts","total_count":4,"children":[{"name":"ensureMemoryMd()","total_count":1,"children":[]},{"name":"promoteLineInContent()","total_count":1,"children":[]},{"name":"promoteLineToFile()","total_count":1,"children":[]},{"name":"readMemoryMd()","total_count":1,"children":[]}]},{"name":"metrics.ts","total_count":6,"children":[{"name":"aggregateMetrics()","total_count":1,"children":[]},{"name":"buildMetricsSummary()","total_count":1,"children":[]},{"name":"dayKey()","total_count":1,"children":[]},{"name":"isoWeek()","total_count":1,"children":[]},{"name":"MetricsSummary","total_count":1,"children":[]},{"name":"round2()","total_count":1,"children":[]}]},{"name":"obsidian.ts","total_count":9,"children":[{"name":"appendToDailyNote()","total_count":1,"children":[]},{"name":"BOARD_COLUMNS","total_count":1,"children":[]},{"name":"readVaultFile()","total_count":1,"children":[]},{"name":"renderCommandBoard()","total_count":1,"children":[]},{"name":"vaultConfigured()","total_count":1,"children":[]},{"name":"writeCloseout()","total_count":1,"children":[]},{"name":"writeCommandBoard()","total_count":1,"children":[]},{"name":"writeVaultDoc()","total_count":1,"children":[]},{"name":"writeVaultFile()","total_count":1,"children":[]}]},{"name":"rate-limit.ts","total_count":4,"children":[{"name":"buckets","total_count":1,"children":[]},{"name":"rateLimit()","total_count":1,"children":[]},{"name":"resetRateLimits()","total_count":1,"children":[]},{"name":"Window","total_count":1,"children":[]}]},{"name":"supabase","total_count":3,"children":[{"name":"admin.ts","total_count":2,"children":[{"name":"__resetAdminClient()","total_count":1,"children":[]},{"name":"createAdminClient()","total_count":1,"children":[]}]},{"name":"server.ts","total_count":1,"children":[{"name":"createSupabaseServerClient()","total_count":1,"children":[]}]}]},{"name":"telegram","total_count":12,"children":[{"name":"bot.ts","total_count":3,"children":[{"name":"__resetBot()","total_count":1,"children":[]},{"name":"createBot()","total_count":1,"children":[]},{"name":"getBot()","total_count":1,"children":[]}]},{"name":"send.ts","total_count":9,"children":[{"name":"configured()","total_count":1,"children":[]},{"name":"decisionKeyboard()","total_count":1,"children":[]},{"name":"escapeHtml()","total_count":1,"children":[]},{"name":"formatDecisionMessage()","total_count":1,"children":[]},{"name":"sendAlert()","total_count":1,"children":[]},{"name":"sendDecisionMessage()","total_count":1,"children":[]},{"name":"sendMarkdown()","total_count":1,"children":[]},{"name":"tg()","total_count":1,"children":[]},{"name":"truncate()","total_count":1,"children":[]}]}]},{"name":"transitions.ts","total_count":5,"children":[{"name":"AGENT_TRANSITIONS","total_count":1,"children":[]},{"name":"canTransition()","total_count":1,"children":[]},{"name":"checkShippedGate()","total_count":1,"children":[]},{"name":"checkVerifiedGate()","total_count":1,"children":[]},{"name":"TRANSITIONS","total_count":1,"children":[]}]}]},{"name":"middleware.ts","total_count":2,"children":[{"name":"config","total_count":1,"children":[]},{"name":"middleware()","total_count":1,"children":[]}]},{"name":"types","total_count":17,"children":[{"name":"db.ts","total_count":17,"children":[{"name":"AgentKind","total_count":1,"children":[]},{"name":"AgentRow","total_count":1,"children":[]},{"name":"AgentSessionRow","total_count":1,"children":[]},{"name":"BrandRow","total_count":1,"children":[]},{"name":"BrandTier","total_count":1,"children":[]},{"name":"ClaimRow","total_count":1,"children":[]},{"name":"DecisionRow","total_count":1,"children":[]},{"name":"DecisionStatus","total_count":1,"children":[]},{"name":"DecisionVia","total_count":1,"children":[]},{"name":"DecisionWithAge","total_count":1,"children":[]},{"name":"HeartbeatEventRow","total_count":1,"children":[]},{"name":"HeartbeatSeverity","total_count":1,"children":[]},{"name":"MemoryLogRow","total_count":1,"children":[]},{"name":"MemoryPromotionRow","total_count":1,"children":[]},{"name":"TaskRow","total_count":1,"children":[]},{"name":"TaskSource","total_count":1,"children":[]},{"name":"TaskStatus","total_count":1,"children":[]}]}]},{"name":"watcher","total_count":18,"children":[{"name":"index.ts","total_count":8,"children":[{"name":"db","total_count":1,"children":[]},{"name":"handleFile()","total_count":1,"children":[]},{"name":"lastSweep","total_count":1,"children":[]},{"name":"logConflict()","total_count":1,"children":[]},{"name":"main()","total_count":1,"children":[]},{"name":"sweepDbChanges()","total_count":1,"children":[]},{"name":"vaultTasksDir()","total_count":1,"children":[]},{"name":"writeTaskFile()","total_count":1,"children":[]}]},{"name":"sync.ts","total_count":10,"children":[{"name":"markSynced()","total_count":1,"children":[]},{"name":"normalizeStatus()","total_count":1,"children":[]},{"name":"ParsedNote","total_count":1,"children":[]},{"name":"parseTaskNote()","total_count":1,"children":[]},{"name":"renderNoteWriteback()","total_count":1,"children":[]},{"name":"resolveByName()","total_count":1,"children":[]},{"name":"STATUS_ALIASES","total_count":1,"children":[]},{"name":"syncNoteToDb()","total_count":1,"children":[]},{"name":"SyncOutcome","total_count":1,"children":[]},{"name":"toIso()","total_count":1,"children":[]}]}]},{"name":"workers","total_count":28,"children":[{"name":"backup.ts","total_count":3,"children":[{"name":"execAsync","total_count":1,"children":[]},{"name":"runNightlyBackup()","total_count":1,"children":[]},{"name":"runWeeklyOffsite()","total_count":1,"children":[]}]},{"name":"board-sync.ts","total_count":1,"children":[{"name":"syncBoardNote()","total_count":1,"children":[]}]},{"name":"checks.ts","total_count":8,"children":[{"name":"checkBoardHygiene()","total_count":1,"children":[]},{"name":"checkDecisionAging()","total_count":1,"children":[]},{"name":"CheckDeps","total_count":1,"children":[]},{"name":"checkGhlWaitlist()","total_count":1,"children":[]},{"name":"checkGscDeltas()","total_count":1,"children":[]},{"name":"checkPublishVerification()","total_count":1,"children":[]},{"name":"envNum()","total_count":1,"children":[]},{"name":"EventInsert","total_count":1,"children":[]}]},{"name":"daily-briefing.ts","total_count":4,"children":[{"name":"Briefing","total_count":1,"children":[]},{"name":"composeBriefing()","total_count":1,"children":[]},{"name":"fmtUsd()","total_count":1,"children":[]},{"name":"runDailyBriefing()","total_count":1,"children":[]}]},{"name":"heartbeat.ts","total_count":6,"children":[{"name":"BeatResult","total_count":1,"children":[]},{"name":"CheckName","total_count":1,"children":[]},{"name":"CHECKS","total_count":1,"children":[]},{"name":"parseHeartbeatMd()","total_count":1,"children":[]},{"name":"readHeartbeatMd()","total_count":1,"children":[]},{"name":"runHeartbeat()","total_count":1,"children":[]}]},{"name":"index.ts","total_count":2,"children":[{"name":"guard()","total_count":1,"children":[]},{"name":"main()","total_count":1,"children":[]}]},{"name":"weekly-closeout.ts","total_count":4,"children":[{"name":"Closeout","total_count":1,"children":[]},{"name":"composeCloseout()","total_count":1,"children":[]},{"name":"isoWeekLabel()","total_count":1,"children":[]},{"name":"runWeeklyCloseout()","total_count":1,"children":[]}]}]}]},{"name":"supabase","total_count":30,"children":[{"name":"migrations","total_count":30,"children":[{"name":"0001_core_schema.sql","total_count":17,"children":[{"name":"agent_sessions","total_count":1,"children":[]},{"name":"agents","total_count":1,"children":[]},{"name":"brands","total_count":1,"children":[]},{"name":"claims","total_count":1,"children":[]},{"name":"claims_verification_guard","total_count":1,"children":[]},{"name":"decisions","total_count":1,"children":[]},{"name":"decisions_with_age","total_count":1,"children":[]},{"name":"enforce_claim_verification()","total_count":1,"children":[]},{"name":"enforce_task_gates()","total_count":1,"children":[]},{"name":"heartbeat_events","total_count":1,"children":[]},{"name":"memory_log","total_count":1,"children":[]},{"name":"memory_log_updated_at","total_count":1,"children":[]},{"name":"memory_promotions","total_count":1,"children":[]},{"name":"set_updated_at()","total_count":1,"children":[]},{"name":"tasks","total_count":1,"children":[]},{"name":"tasks_gates","total_count":1,"children":[]},{"name":"tasks_updated_at","total_count":1,"children":[]}]},{"name":"0002_rls.sql","total_count":9,"children":[{"name":"agent_sessions","total_count":1,"children":[]},{"name":"agents","total_count":1,"children":[]},{"name":"brands","total_count":1,"children":[]},{"name":"claims","total_count":1,"children":[]},{"name":"decisions","total_count":1,"children":[]},{"name":"heartbeat_events","total_count":1,"children":[]},{"name":"memory_log","total_count":1,"children":[]},{"name":"memory_promotions","total_count":1,"children":[]},{"name":"tasks","total_count":1,"children":[]}]},{"name":"0003_realtime_storage.sql","total_count":1,"children":[{"name":"public.tasks","total_count":1,"children":[]}]},{"name":"0004_brain_memory.sql","total_count":3,"children":[{"name":"match_memories()","total_count":1,"children":[]},{"name":"memories","total_count":1,"children":[]},{"name":"working_memory","total_count":1,"children":[]}]}]}]},{"name":"tests","total_count":72,"children":[{"name":"api","total_count":23,"children":[{"name":"agents.test.ts","total_count":3,"children":[{"name":"agentRow","total_count":1,"children":[]},{"name":"ctx","total_count":1,"children":[]},{"name":"ID","total_count":1,"children":[]}]},{"name":"brands.test.ts","total_count":1,"children":[{"name":"brand","total_count":1,"children":[]}]},{"name":"claims.test.ts","total_count":5,"children":[{"name":"CLAIM_ID","total_count":1,"children":[]},{"name":"claimCtx","total_count":1,"children":[]},{"name":"claimRow()","total_count":1,"children":[]},{"name":"TASK_ID","total_count":1,"children":[]},{"name":"taskCtx","total_count":1,"children":[]}]},{"name":"decisions.test.ts","total_count":3,"children":[{"name":"ctx","total_count":1,"children":[]},{"name":"DEC_ID","total_count":1,"children":[]},{"name":"decisionRow()","total_count":1,"children":[]}]},{"name":"heartbeat.test.ts","total_count":1,"children":[{"name":"signedReq()","total_count":1,"children":[]}]},{"name":"metrics.test.ts","total_count":5,"children":[{"name":"AGENT_A","total_count":1,"children":[]},{"name":"AGENT_B","total_count":1,"children":[]},{"name":"BRAND_ALP","total_count":1,"children":[]},{"name":"session()","total_count":1,"children":[]},{"name":"TASK_1","total_count":1,"children":[]}]},{"name":"tasks.test.ts","total_count":3,"children":[{"name":"ctx","total_count":1,"children":[]},{"name":"TASK_ID","total_count":1,"children":[]},{"name":"taskRow()","total_count":1,"children":[]}]},{"name":"memory.test.ts","total_count":1,"children":[]},{"name":"tts.test.ts","total_count":1,"children":[]}]},{"name":"command","total_count":10,"children":[{"name":"brain.test.ts","total_count":7,"children":[{"name":"asDb()","total_count":1,"children":[]},{"name":"baseTables()","total_count":1,"children":[]},{"name":"SystemBlocks","total_count":1,"children":[]},{"name":"systemOf()","total_count":1,"children":[]},{"name":"textResponse()","total_count":1,"children":[]},{"name":"toolUseResponse()","total_count":1,"children":[]},{"name":"USAGE","total_count":1,"children":[]}]},{"name":"memory.test.ts","total_count":3,"children":[{"name":"asDb()","total_count":1,"children":[]},{"name":"textResponse()","total_count":1,"children":[]},{"name":"USAGE","total_count":1,"children":[]}]}]},{"name":"helpers","total_count":21,"children":[{"name":"admin-mock.ts","total_count":2,"children":[{"name":"__resetAdminClient()","total_count":1,"children":[]},{"name":"createAdminClient()","total_count":1,"children":[]}]},{"name":"anthropic-mock.ts","total_count":3,"children":[{"name":"[Symbol.asyncIterator]()","total_count":1,"children":[]},{"name":"chunk()","total_count":1,"children":[]},{"name":"MockAnthropic","total_count":1,"children":[]}]},{"name":"auth-mock.ts","total_count":3,"children":[{"name":"getActor()","total_count":1,"children":[]},{"name":"getAgentActor()","total_count":1,"children":[]},{"name":"getHumanActor()","total_count":1,"children":[]}]},{"name":"harness.ts","total_count":13,"children":[{"name":"AGENT()","total_count":1,"children":[]},{"name":"anthropicState","total_count":1,"children":[]},{"name":"authState","total_count":1,"children":[]},{"name":"byTable()","total_count":1,"children":[]},{"name":"createMockDb()","total_count":1,"children":[]},{"name":"dbHolder","total_count":1,"children":[]},{"name":"HUMAN","total_count":1,"children":[]},{"name":"makeReq()","total_count":1,"children":[]},{"name":"MockDb","total_count":1,"children":[]},{"name":"Op","total_count":1,"children":[]},{"name":"OpResult","total_count":1,"children":[]},{"name":"Responder","total_count":1,"children":[]},{"name":"uuid()","total_count":1,"children":[]}]}]},{"name":"integrations","total_count":10,"children":[{"name":"hermes.test.ts","total_count":1,"children":[{"name":"asDb()","total_count":1,"children":[]}]},{"name":"telegram.test.ts","total_count":6,"children":[{"name":"BOT_INFO","total_count":1,"children":[]},{"name":"callbackUpdate()","total_count":1,"children":[]},{"name":"DEC_ID","total_count":1,"children":[]},{"name":"decisionRow()","total_count":1,"children":[]},{"name":"testBot()","total_count":1,"children":[]},{"name":"textUpdate()","total_count":1,"children":[]}]},{"name":"watcher.test.ts","total_count":3,"children":[{"name":"asDb()","total_count":1,"children":[]},{"name":"NOW","total_count":1,"children":[]},{"name":"taskRow()","total_count":1,"children":[]}]}]},{"name":"lib","total_count":2,"children":[{"name":"brain-files.test.ts","total_count":1,"children":[{"name":"tempDir()","total_count":1,"children":[]}]},{"name":"core.test.ts","total_count":1,"children":[]}]},{"name":"workers","total_count":5,"children":[{"name":"crons.test.ts","total_count":3,"children":[{"name":"asDb()","total_count":1,"children":[]},{"name":"NOW","total_count":1,"children":[]},{"name":"standardData()","total_count":1,"children":[]}]},{"name":"heartbeat.test.ts","total_count":2,"children":[{"name":"asDb()","total_count":1,"children":[]},{"name":"NOW","total_count":1,"children":[]}]}]},{"name":"setup.ts","total_count":1,"children":[]}]},{"name":"tsconfig.json","total_count":26,"children":[{"name":"**/*.ts","total_count":1,"children":[]},{"name":"**/*.tsx","total_count":1,"children":[]},{"name":".next/types/**/*.ts","total_count":1,"children":[]},{"name":"allowJs","total_count":1,"children":[]},{"name":"compilerOptions","total_count":1,"children":[]},{"name":"dom","total_count":1,"children":[]},{"name":"dom.iterable","total_count":1,"children":[]},{"name":"esModuleInterop","total_count":1,"children":[]},{"name":"esnext","total_count":1,"children":[]},{"name":"exclude","total_count":1,"children":[]},{"name":"include","total_count":1,"children":[]},{"name":"incremental","total_count":1,"children":[]},{"name":"isolatedModules","total_count":1,"children":[]},{"name":"jsx","total_count":1,"children":[]},{"name":"lib","total_count":1,"children":[]},{"name":"module","total_count":1,"children":[]},{"name":"moduleResolution","total_count":1,"children":[]},{"name":"next-env.d.ts","total_count":1,"children":[]},{"name":"node_modules","total_count":1,"children":[]},{"name":"noEmit","total_count":1,"children":[]},{"name":"paths","total_count":1,"children":[]},{"name":"plugins","total_count":1,"children":[]},{"name":"resolveJsonModule","total_count":1,"children":[]},{"name":"skipLibCheck","total_count":1,"children":[]},{"name":"strict","total_count":1,"children":[]},{"name":"target","total_count":1,"children":[]}]},{"name":"ecosystem.config.cjs","total_count":1,"children":[]},{"name":"vitest.config.ts","total_count":1,"children":[]}]};
+
+    function transformData(jsonData) {
+        // Helper function to recursively build the children structure
+        function processNode(node, parentL1StageName) {
+            let displayName = node.name;
+            // Append total_count if it exists and is not already in the name
+            if (node.total_count !== undefined) {
+                if (!/\(Total Count: \d+\)$/.test(displayName)) {
+                    displayName += ` (Total Count: ${node.total_count})`;
+                }
+            }
+
+            const newNode = { name: displayName };
+
+            if (parentL1StageName === "Root") {
+                 newNode.originalStageName = node.name;
+            } else {
+                newNode.originalStageName = parentL1StageName;
+            }
+
+            if (node.children && node.children.length > 0) {
+                const stageNameToPass = (parentL1StageName === "Root") ? node.name : parentL1StageName;
+                newNode.children = node.children.map(child => processNode(child, stageNameToPass));
+            }
+
+            return newNode;
+        }
+
+        let rootDisplayName = jsonData.name;
+        if (jsonData.total_count !== undefined && !/\(Total Count: \d+\)$/.test(rootDisplayName)) {
+            rootDisplayName += ` (Total Count: ${jsonData.total_count})`;
+        }
+
+        return {
+            name: rootDisplayName,
+            originalStageName: "Root",
+            children: (jsonData.children || []).map(child => processNode(child, "Root"))
+        };
+    }
+
+    const treeData = transformData(initialJsonData);
+
+    // Auto-populated phaseColors: every depth-1 child of the root gets
+    // a stable colour from a bigger palette so all top-level dirs are
+    // distinguishable.
+    const PALETTE = [
+      ["#3498DB","#2980B9","#AED6F1"], ["#2ECC71","#27AE60","#A9DFBF"],
+      ["#E74C3C","#C0392B","#F5B7B1"], ["#9B59B6","#8E44AD","#D7BDE2"],
+      ["#F39C12","#D68910","#FAD7A0"], ["#1ABC9C","#117864","#A2D9CE"],
+      ["#34495E","#1B2631","#ABB2B9"], ["#E67E22","#BA4A00","#F5CBA7"],
+      ["#16A085","#0E6655","#A2D9CE"], ["#D35400","#A04000","#EDBB99"],
+      ["#7F8C8D","#566573","#D5DBDB"], ["#C0392B","#7B241C","#F5B7B1"],
+      ["#2E86C1","#1B4F72","#A9CCE3"], ["#28B463","#196F3D","#A9DFBF"],
+      ["#AF7AC5","#6C3483","#D2B4DE"],
+    ];
+    const phaseColors = { "Root": { fill: "#4A4A4A", stroke: "#333333", collapsedFill: "#6C757D" },
+                          "Default": { fill: "#BDC3C7", stroke: "#95A5A6", collapsedFill: "#ECF0F1" } };
+    (initialJsonData.children || []).forEach((c, i) => {
+      const pal = PALETTE[i % PALETTE.length];
+      phaseColors[c.name] = { fill: pal[0], stroke: pal[1], collapsedFill: pal[2] };
+    });
+
+    const levelSpecificPalettes = {
+      0: { fill: "#4A4A4A", stroke: "#333333", collapsedFill: "#6C757D" },
+      2: { fill: "#6ab04c", stroke: "#508a38", collapsedFill: "#a3d391" },
+      3: { fill: "#f0932b", stroke: "#d0730f", collapsedFill: "#f6c07e" },
+      4: { fill: "#be2edd", stroke: "#a01cb3", collapsedFill: "#e08bf2" },
+      5: { fill: "#00a8ff", stroke: "#007ac1", collapsedFill: "#74d2ff" },
+      6: { fill: "#e55039", stroke: "#c23620", collapsedFill: "#f09a8d" },
+      default: { fill: "#747d8c", stroke: "#57606f", collapsedFill: "#a4b0be" }
+    };
+
+    const svgElement = d3.select("#tree-svg");
+    const initialSvgWidth = +svgElement.attr("width");
+    const initialSvgHeight = +svgElement.attr("height");
+    const margin = { top: 40, right: 120, bottom: 80, left: 450 };
+    let width = initialSvgWidth - margin.left - margin.right;
+    let height = initialSvgHeight - margin.top - margin.bottom;
+    const duration = 500;
+    let nodeCounter = 0;
+    const g = svgElement.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+    const treemap = d3.tree().nodeSize([40, 0]);
+    let rootNode = d3.hierarchy(treeData, d => d.children);
+    rootNode.x0 = 0;
+    rootNode.y0 = 0;
+
+    if (rootNode.children) {
+      rootNode.children.forEach(d_child => {
+        if (d_child.children) { collapseBranch(d_child); }
+      });
+    }
+    updateTree(rootNode);
+
+    function collapseBranch(d) { if (d.children) { d._children = d.children; d._children.forEach(collapseBranch); d.children = null; } }
+    function expandBranch(d) { if (d._children) { d.children = d._children; d._children = null; } if (d.children) { d.children.forEach(expandBranch); } }
+    window.expandAll = () => { expandBranch(rootNode); updateTree(rootNode); };
+    window.collapseAll = () => { if (rootNode.children) { rootNode.children.forEach(collapseBranch); } updateTree(rootNode); };
+    window.resetView = () => { if (rootNode.children) { rootNode.children.forEach(d_child => { if (d_child.children || d_child._children) { collapseBranch(d_child); } }); } if (rootNode._children && !rootNode.children) { rootNode.children = rootNode._children; rootNode._children = null; } updateTree(rootNode); };
+
+    function updateTree(source) {
+      const treeLayoutData = treemap(rootNode);
+      let nodes = treeLayoutData.descendants();
+      let links = treeLayoutData.descendants().slice(1);
+
+      let minX = 0;
+      let maxX = 0;
+      if (nodes.length > 0) {
+        minX = d3.min(nodes, d => d.x);
+        maxX = d3.max(nodes, d => d.x);
+      }
+
+      let neededHeight = Math.max(initialSvgHeight, maxX - minX + margin.top + margin.bottom + 100);
+      svgElement.transition().duration(duration / 2).attr("height", neededHeight);
+      g.transition().duration(duration / 2).attr("transform", `translate(${margin.left},${margin.top - minX + 40})`);
+
+      nodes.forEach(d => { d.y = d.depth * 400; }); // Adjust horizontal separation if needed
+
+      const node = g.selectAll('g.node').data(nodes, d => d.id || (d.id = ++nodeCounter));
+      const nodeEnter = node.enter().append('g')
+        .attr('class', d => "node" + (d.children || d._children ? " node--internal" : " node--leaf") + (d._children ? " _children" : ""))
+        .attr('transform', d => `translate(${source.y0},${source.x0})`)
+        .on('click', (event, d) => { if (d.children) { d._children = d.children; d.children = null; } else if (d._children) { d.children = d._children; d._children = null; } updateTree(d); })
+        .style('cursor', d => (d.children || d._children) ? 'pointer' : 'default');
+
+      nodeEnter.append('circle').attr('r', 1e-6);
+
+      nodeEnter.append('text')
+        .attr('dy', '.35em')
+        .attr('x', d => d.children || d._children ? -14 : 14)
+        .attr('text-anchor', d => d.children || d._children ? 'end' : 'start')
+        .style("fill-opacity", 1e-6)
+        .call(wrapText, 380);
+
+      const nodeUpdate = nodeEnter.merge(node);
+      nodeUpdate.transition().duration(duration)
+        .attr('transform', d => `translate(${d.y},${d.x})`)
+        .attr('class', d => "node" + (d.children ? " node--internal" : " node--leaf") + (d._children ? " node--internal _children" : ""));
+
+      nodeUpdate.select('circle').attr('r', 8.5)
+        .style('fill', d => {
+            let palette;
+            if (d.depth === 0) {
+                palette = levelSpecificPalettes[0];
+            } else if (d.depth === 1) {
+                palette = phaseColors[d.data.originalStageName] || phaseColors.Default;
+            } else {
+                palette = levelSpecificPalettes[d.depth] || levelSpecificPalettes.default;
+            }
+            if (d._children) return palette.collapsedFill;
+            if (d.children) return palette.fill;
+            return "#fff";
+        })
+        .style('stroke', d => {
+            let palette;
+            if (d.depth === 0) {
+                palette = levelSpecificPalettes[0];
+            } else if (d.depth === 1) {
+                palette = phaseColors[d.data.originalStageName] || phaseColors.Default;
+            } else {
+                palette = levelSpecificPalettes[d.depth] || levelSpecificPalettes.default;
+            }
+            return palette.stroke;
+        });
+      nodeUpdate.select('text').style("fill-opacity", 1).call(wrapText, 380);
+
+      const nodeExit = node.exit().transition().duration(duration).attr('transform', d => `translate(${source.y},${source.x})`).remove();
+      nodeExit.select('circle').attr('r', 1e-6);
+      nodeExit.select('text').style('fill-opacity', 1e-6);
+
+      const link = g.selectAll('path.link').data(links, d => d.id);
+      const linkEnter = link.enter().insert('path', "g").attr('class', 'link').attr('d', d => { const o = { x: source.x0, y: source.y0 }; return diagonal(o, o); });
+
+      linkEnter.merge(link).transition().duration(duration).attr('d', d => diagonal(d, d.parent))
+        .style('stroke', d => {
+            const sourceNode = d.parent;
+            if (!sourceNode) return phaseColors.Default.stroke;
+            const l1AncestorName = sourceNode.data.originalStageName;
+            const colorPalette = phaseColors[l1AncestorName] || phaseColors.Default;
+            return colorPalette.stroke;
+        });
+      link.exit().transition().duration(duration).attr('d', d => { const o = { x: source.x, y: source.y }; return diagonal(o, o); }).remove();
+      nodes.forEach(d => { d.x0 = d.x; d.y0 = d.y; });
+    }
+
+    function diagonal(s, d) { return `M ${s.y} ${s.x} C ${(s.y + d.y) / 2} ${s.x}, ${(s.y + d.y) / 2} ${d.x}, ${d.y} ${d.x}`; }
+
+    function wrapText(textElements, maxWidth) {
+        const textPartColors = {
+            name: '#343a40',
+            count: '#0056b3'
+        };
+        const countRegex = /(\s\(Total Count: \d+\))$/;
+
+        textElements.each(function () {
+            const textD3 = d3.select(this);
+            const originalNodeText = textD3.datum().data.name;
+            const x = parseFloat(textD3.attr("x") || 0);
+            const initialDy = textD3.attr("dy");
+            const textAnchor = textD3.attr("text-anchor");
+            const lineHeight = 1.1;
+
+            textD3.text(null);
+
+            let namePart = originalNodeText;
+            let countPartText = "";
+
+            const countMatch = originalNodeText.match(countRegex);
+            if (countMatch && originalNodeText.endsWith(countMatch[0])) {
+                namePart = originalNodeText.substring(0, originalNodeText.length - countMatch[0].length).trim();
+                countPartText = countMatch[0].trim();
+            }
+
+            const tokens = [];
+            namePart.split(/\s+/).filter(Boolean).forEach(word => {
+                tokens.push({ text: word, type: 'name' });
+            });
+            if (countPartText) {
+                tokens.push({ text: countPartText, type: 'count' });
+            }
+
+            if (tokens.length === 0 && originalNodeText) {
+                tokens.push({ text: originalNodeText, type: 'name' });
+            }
+
+            let currentTspan = textD3.append("tspan").attr("x", x).attr("dy", initialDy);
+            if (textAnchor === "end") currentTspan.attr("text-anchor", "end");
+
+            let lineTokens = [];
+
+            for (let i = 0; i < tokens.length; i++) {
+                const tokenObj = tokens[i];
+
+                lineTokens.push(tokenObj);
+                currentTspan.text(lineTokens.map(t => t.text).join(" "));
+
+                if (currentTspan.node().getComputedTextLength() > maxWidth && lineTokens.length > 1) {
+                    lineTokens.pop();
+
+                    currentTspan.text(null);
+                    lineTokens.forEach((prevToken, idx) => {
+                        currentTspan.append("tspan")
+                            .text((idx > 0 ? " " : "") + prevToken.text)
+                            .style("fill", textPartColors[prevToken.type] || textPartColors.name)
+                            .style("font-weight", prevToken.type === 'count' ? "bold" : "normal");
+                    });
+
+                    lineTokens = [tokenObj];
+                    currentTspan = textD3.append("tspan").attr("x", x).attr("dy", lineHeight + "em");
+                    if (textAnchor === "end") currentTspan.attr("text-anchor", "end");
+                }
+            }
+
+            currentTspan.text(null);
+            lineTokens.forEach((token, idx) => {
+                currentTspan.append("tspan")
+                    .text((idx > 0 ? " " : "") + token.text)
+                    .style("fill", textPartColors[token.type] || textPartColors.name)
+                    .style("font-weight", token.type === 'count' ? "bold" : "normal");
+            });
+
+            if (textD3.selectAll("tspan > tspan").empty() && textD3.select("tspan").text().length === 0 && originalNodeText) {
+                let t = textD3.select("tspan");
+                let displayText = originalNodeText;
+                t.text(displayText).style("fill", textPartColors.name);
+                if (t.node() && t.node().getComputedTextLength() > maxWidth && displayText.length > 20) {
+                    let estimatedChars = Math.floor(maxWidth / (t.node().getComputedTextLength()/displayText.length) );
+                    displayText = displayText.substring(0, Math.max(0, estimatedChars - 3)) + "...";
+                    t.text(displayText);
+                }
+            }
+        });
+    }
+  </script>
+</body>
+</html>
